@@ -33,6 +33,7 @@
 CMD_START\n           → Gateway: STATE_ACQUIRING, ACK,CMD_START,OK
 CMD_STOP\n            → Gateway: STATE_IDLE, ACK,CMD_STOP,OK
 CMD_SET_TIME,{ms}\n   → Gateway: sync RTC, ACK,CMD_SET_TIME,OK
+CMD_SET_RATE,{hz}\n   → Gateway: set sample rate, ACK,CMD_SET_RATE,{hz}
 ```
 
 ## 3. Shared Protocol (shared/tdma_protocol.h)
@@ -62,7 +63,7 @@ Always 10 slots. Active nodes fill all slots via round-robin:
 ### Packet Types
 | Type | Code | Direction | Struct | Size |
 |---|---|---|---|---|
-| PKT_BEACON_SYNC | 0x11 | GW → Broadcast | `BeaconSyncPacket` | 74B |
+| PKT_BEACON_SYNC | 0x11 | GW → Broadcast | `BeaconSyncPacket` | **78B** |
 | PKT_NODE_HELLO | 0x12 | Node → GW | `NodeHelloPacket` | 8B |
 | PKT_DATA | 0x13 | Node → GW | `DataPacketHeader` + samples | 14B+ |
 | PKT_DIRECT_ACK | 0x14 | GW → Node | `DirectAckPacket` | 10B |
@@ -86,7 +87,7 @@ PC clock → CMD_SET_TIME → Gateway rtc_epoch_ms → Beacon → Node RTC
 ```
 DATA,{node_id},{ch_id},{seq},{encoding},{first_idx},{count},{val1},{val2},...
 TIMING,{node_id},{ch_id},{rate_hz},{dt_us},{t0_epoch_ms},{t0_sample_idx}
-BEACON,{seq},STATE={s},NODES={n},SLOT_US={us},RTC={ms},SCHED={id;...},ACKS={id:seq;...}
+BEACON,{seq},STATE={s},NODES={n},SLOT_US={us},RATE={hz},RTC={ms},SCHED={id;...},ACKS={id:seq;...}
 HELLO,{node_id},{mac},CH={mask},RATE={hz}
 ACK,{command},{result}
 NODE_JOIN,{node_id},{mac}
@@ -111,3 +112,5 @@ STATS_BEGIN / STATS,... / NODE,... / STATS_END
 3. **Test with `pio run`** in both firmware dirs.
 4. **Serial format is the contract** between C++ and Python.
 5. **t0+dt timing**: never add per-sample timestamps to DATA packets.
+6. **Lossless**: node uses ACK-gated ring buffer — data retained until ACKed.
+7. **Rate**: configurable 1–10000 Hz via CMD_SET_RATE, propagated via beacon.

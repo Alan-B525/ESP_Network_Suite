@@ -493,11 +493,12 @@ private:
         if (err != ESP_OK) beacon_errors_++;
 
         // Imprimir beacon info al serial
-        Serial.printf("BEACON,%lu,STATE=%u,NODES=%u,SLOT_US=%u,RTC=%llu,SCHED=",
+        Serial.printf("BEACON,%lu,STATE=%u,NODES=%u,SLOT_US=%u,RATE=%u,RTC=%llu,SCHED=",
                       (unsigned long)beacon.beacon_sequence,
                       beacon.system_state,
                       beacon.active_nodes,
                       beacon.slot_us,
+                      beacon.sample_rate_hz,
                       (unsigned long long)beacon.rtc_epoch_ms);
 
         for (uint8_t i = 0; i < MAX_SLOTS; i++) {

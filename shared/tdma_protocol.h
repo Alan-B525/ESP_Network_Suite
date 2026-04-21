@@ -17,7 +17,7 @@
 // Formato serial v4 (Base Station → PC):
 //   DATA,node_id,ch_id,seq,encoding,first_idx,sample_count,val1,val2,...
 //   TIMING,node_id,ch_id,sample_rate_hz,dt_us,t0_epoch_ms,t0_sample_idx
-//   BEACON,seq,STATE=s,NODES=n,SLOT_US=us,RTC=ms,SCHED=id;id;...,ACKS=id:seq;...
+//   BEACON,seq,STATE=s,NODES=n,SLOT_US=us,RATE=hz,RTC=ms,SCHED=id;id;...,ACKS=id:seq;...
 //   HELLO,node_id,mac,CH=mask,RATE=hz
 //   NODE_JOIN,node_id,mac
 //   NODE_TIMEOUT,node_id,mac
@@ -26,6 +26,12 @@
 //   WARN,type,detail
 //   ACK,command,result
 //   STATS_BEGIN / STATS,... / NODE,... / STATS_END
+//
+// Comandos serial v4 (PC → Base Station):
+//   CMD_START\n          → ACK,CMD_START,OK
+//   CMD_STOP\n           → ACK,CMD_STOP,OK
+//   CMD_SET_TIME,{ms}\n  → ACK,CMD_SET_TIME,OK
+//   CMD_SET_RATE,{hz}\n  → ACK,CMD_SET_RATE,{hz}
 // ============================================================
 
 #include <stddef.h>

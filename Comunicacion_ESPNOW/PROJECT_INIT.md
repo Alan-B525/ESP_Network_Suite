@@ -1,8 +1,8 @@
 > [!CAUTION]
 > **⚠️ DOCUMENTO LEGACY — NO USAR COMO REFERENCIA ⚠️**
 >
-> Este archivo describe el protocolo v1 original. El sistema actual usa **protocolo v3**
-> con BeaconSync, TDMA dinámico, DirectACK, etc.
+> Este archivo describe el protocolo v1 original. El sistema actual usa **protocolo v4**
+> con TDMA round-robin, multi-canal, lossless ACK, control START/STOP, etc.
 >
 > **Documentación actualizada:**
 > - Arquitectura del sistema: `ESP_Network_Suite/SYSTEM_ARCHITECTURE.md`
