@@ -29,8 +29,9 @@ import serial
 import serial.tools.list_ports
 
 from core.protocol_parser import (
-    ProtocolParser, DataFrame, BeaconFrame, HelloFrame, JoinFrame,
-    TimeoutFrame, LossFrame, StatsFrame, BootFrame, WarnFrame, AckFrame,
+    ProtocolParser, DataFrame, TimingFrame, BeaconFrame, HelloFrame,
+    JoinFrame, TimeoutFrame, LossFrame, StatsFrame, BootFrame, WarnFrame,
+    AckFrame,
 )
 
 
@@ -414,6 +415,8 @@ class SerialManager:
         """Distribuye la trama parseada a los consumidores apropiados."""
         if isinstance(frame, DataFrame):
             self._handle_data_frame(frame)
+        elif isinstance(frame, TimingFrame):
+            self._handle_timing_frame(frame)
         elif isinstance(frame, BeaconFrame):
             self._handle_beacon_frame(frame)
         elif isinstance(frame, (HelloFrame, JoinFrame)):
@@ -468,6 +471,21 @@ class SerialManager:
             if len(self._node_data_buffer[node_id]) > self._buffer_max_size:
                 self._node_data_buffer[node_id] = \
                     self._node_data_buffer[node_id][-self._buffer_max_size:]
+
+    def _handle_timing_frame(self, frame: TimingFrame):
+        """Procesa TIMING_INFO: almacena t0/dt por nodo+canal para reconstrucción temporal."""
+        key = (frame.node_id, frame.channel_id)
+        with self._lock:
+            if not hasattr(self, '_timing_info'):
+                self._timing_info = {}
+            self._timing_info[key] = {
+                'sample_rate_hz': frame.sample_rate_hz,
+                'dt_us': frame.dt_us,
+                't0_epoch_ms': frame.t0_epoch_ms,
+                't0_sample_index': frame.t0_sample_index,
+            }
+        print(f"[SERIAL] TIMING node={frame.node_id} ch={frame.channel_id} "
+              f"rate={frame.sample_rate_hz}Hz dt={frame.dt_us}us")
 
     def _handle_beacon_frame(self, frame: BeaconFrame):
         """Procesa beacon: actualiza estado de red."""
