@@ -218,55 +218,54 @@ class DataLogger:
 
     def _write_data_frame(self, frame: DataFrame):
         """
-        Escribe un DataFrame en el archivo CSV correspondiente al nodo.
+        Escribe un DataFrame en el archivo CSV correspondiente al nodo+canal.
 
-        Si el archivo del nodo no existe, lo crea con el encabezado.
-        El número de columnas de valores se determina automáticamente.
-
-        Args:
-            frame: DataFrame parseado con los datos del sensor.
+        v4: cada archivo CSV es por nodo_canal para organizar multi-canal.
         """
-        node_id = frame.node_id
+        csv_key = (frame.node_id, frame.channel_id)
 
-        # Crear archivo CSV para este nodo si no existe
-        if node_id not in self._csv_files:
-            self._create_csv_for_node(node_id, len(frame.values))
+        # Crear archivo CSV para este nodo+canal si no existe
+        if csv_key not in self._csv_files:
+            self._create_csv_for_node(frame.node_id, frame.channel_id,
+                                      len(frame.values))
 
         # Escribir la fila de datos
-        csv_info = self._csv_files[node_id]
+        csv_info = self._csv_files[csv_key]
         row = [
-            frame.timestamp.isoformat(),  # Timestamp ISO 8601
-            frame.node_id,                 # ID del nodo
-            frame.sequence,                # Número de secuencia
-        ] + frame.values                   # Valores del sensor
+            frame.timestamp.isoformat(),
+            frame.node_id,
+            frame.channel_id,
+            frame.sequence,
+            frame.first_sample_index,
+        ] + frame.values
 
         csv_info['writer'].writerow(row)
         csv_info['count'] += 1
 
-    def _create_csv_for_node(self, node_id: int, num_values: int):
+    def _create_csv_for_node(self, node_id: int, channel_id: int,
+                              num_values: int):
         """
-        Crea el archivo CSV y su writer para un nodo específico.
+        Crea el archivo CSV y su writer para un nodo+canal específico.
 
-        Args:
-            node_id: ID del nodo para el cual crear el archivo.
-            num_values: Cantidad de valores por trama (columnas de valores).
+        v4: archivos nombrados node_{id}_ch{ch}.csv
         """
         if not self.session_path:
             return
 
-        filepath = self.session_path / f"node_{node_id}.csv"
+        filepath = self.session_path / f"node_{node_id}_ch{channel_id}.csv"
 
         # Abrir archivo en modo append con buffering de línea
         file_obj = open(filepath, 'w', newline='', encoding='utf-8')
         writer = csv.writer(file_obj)
 
-        # Escribir encabezado
-        header = ['timestamp', 'node_id', 'sequence']
+        # Escribir encabezado v4
+        header = ['timestamp', 'node_id', 'channel_id', 'sequence',
+                  'first_sample_index']
         header += [f'value_{i}' for i in range(num_values)]
         writer.writerow(header)
 
-        # Guardar referencia para uso posterior
-        self._csv_files[node_id] = {
+        csv_key = (node_id, channel_id)
+        self._csv_files[csv_key] = {
             'file': file_obj,
             'writer': writer,
             'count': 0,

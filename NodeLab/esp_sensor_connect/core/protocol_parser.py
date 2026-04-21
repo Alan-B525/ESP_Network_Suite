@@ -1,24 +1,22 @@
 """
-protocol_parser.py - Deserializador de tramas del Gateway TDMA ESP32
+protocol_parser.py - Deserializador de tramas del Gateway TDMA v4
 =====================================================================
 
 Interpreta las tramas CSV recibidas por el puerto serie desde la
-Base Station (Comunicacion_ESPNOW). Formato real del firmware v3.
+Base Station (Comunicacion_ESPNOW). Formato del firmware v4.
 
 Tramas soportadas:
-  DATA_INT16  : DATA_INT16,node_id,seq,gw_rx_us,node_ts_us,val1,val2,...
-  DATA_FLOAT  : DATA_FLOAT,node_id,seq,gw_rx_us,node_ts_us,val1,val2,...
-  BEACON      : BEACON,seq,NODES=n,SLOT_US=us,REG_MS=ms,ACKS=id:seq;...
-  HELLO       : HELLO,node_id,mac
-  NODE_JOIN   : NODE_JOIN,node_id,mac
+  DATA      : DATA,node_id,ch_id,seq,encoding,first_idx,count,val1,...
+  TIMING    : TIMING,node_id,ch_id,sample_rate_hz,dt_us,t0_epoch_ms,t0_idx
+  BEACON    : BEACON,seq,STATE=s,NODES=n,SLOT_US=us,RTC=ms,SCHED=...,ACKS=...
+  HELLO     : HELLO,node_id,mac,CH=mask,RATE=hz
+  NODE_JOIN : NODE_JOIN,node_id,mac
   NODE_TIMEOUT: NODE_TIMEOUT,node_id,mac
-  LOSS        : LOSS,node_id,EXPECTED=x,GOT=y
-  BOOT        : BOOT,key[,value]
-  WARN        : WARN,type,detail
-  STATS_BEGIN / NODE,... / STATS_END  (bloque multilinea)
-
-Cada trama se convierte en un dataclass tipado para su consumo
-seguro por el resto de la aplicacion.
+  LOSS      : LOSS,node_id,EXPECTED=x,GOT=y
+  ACK       : ACK,command,result
+  BOOT      : BOOT,key[,value]
+  WARN      : WARN,type,detail
+  STATS_BEGIN / NODE,... / STATS_END
 """
 
 from dataclasses import dataclass, field
@@ -32,41 +30,55 @@ from typing import Optional, Union
 
 @dataclass
 class DataFrame:
-    """
-    Trama de datos de un nodo sensor (DATA_INT16 o DATA_FLOAT).
-    Contiene ID del nodo, secuencia, timestamps y valores.
-    """
+    """Trama de datos de un nodo sensor (v4: con channel_id y first_sample_index)."""
     node_id: int
+    channel_id: int
     sequence: int
+    encoding: int
+    first_sample_index: int
+    sample_count: int
     values: list[float]
-    gateway_rx_us: int = 0
-    node_timestamp_us: int = 0
-    encoding: str = "int16"
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class TimingFrame:
+    """Trama TIMING_INFO — sincronización temporal t0+dt."""
+    node_id: int
+    channel_id: int
+    sample_rate_hz: int
+    dt_us: int
+    t0_epoch_ms: int
+    t0_sample_index: int
     timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
 class BeaconFrame:
-    """Trama de beacon enviada por el gateway cada ciclo TDMA."""
+    """Trama de beacon v4 con system_state, RTC y schedule."""
     beacon_sequence: int
-    active_nodes: int
+    system_state: int = 0
+    active_nodes: int = 0
     slot_us: int = 0
-    registration_ms: int = 0
-    ack_map: dict = field(default_factory=dict)  # {node_id: highest_acked_seq}
+    rtc_epoch_ms: int = 0
+    schedule: list[int] = field(default_factory=list)
+    ack_map: dict = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
 class HelloFrame:
-    """Trama HELLO — un nodo se anuncio al gateway."""
+    """Trama HELLO v4 con multi-canal."""
     node_id: int
     mac: str
+    channel_mask: int = 0
+    sample_rate_hz: int = 0
     timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
 class JoinFrame:
-    """Trama NODE_JOIN — un nodo fue aceptado en la red."""
+    """Trama NODE_JOIN."""
     node_id: int
     mac: str
     timestamp: datetime = field(default_factory=datetime.now)
@@ -74,7 +86,7 @@ class JoinFrame:
 
 @dataclass
 class TimeoutFrame:
-    """Trama NODE_TIMEOUT — un nodo fue removido por inactividad."""
+    """Trama NODE_TIMEOUT."""
     node_id: int
     mac: str
     timestamp: datetime = field(default_factory=datetime.now)
@@ -82,7 +94,7 @@ class TimeoutFrame:
 
 @dataclass
 class LossFrame:
-    """Trama LOSS — el gateway detecto un gap de secuencia."""
+    """Trama LOSS — gap de secuencia detectado."""
     node_id: int
     expected_seq: int
     got_seq: int
@@ -90,10 +102,20 @@ class LossFrame:
 
 
 @dataclass
+class AckFrame:
+    """Trama ACK — respuesta a un comando."""
+    command: str
+    result: str
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
 class NodeStatsEntry:
-    """Estadisticas de un nodo individual dentro de un bloque STATS."""
+    """Estadísticas de un nodo en un bloque STATS."""
     node_id: int
     mac: str = ""
+    channel_mask: int = 0
+    sample_rate_hz: int = 0
     rx: int = 0
     emit: int = 0
     acked: int = 0
@@ -110,14 +132,14 @@ class StatsFrame:
     slot_us: int = 0
     rx_overrun: int = 0
     beacon_tx_err: int = 0
-    direct_ack_tx_err: int = 0
-    nodes: list = field(default_factory=list)  # list[NodeStatsEntry]
+    tx_err: int = 0
+    nodes: list = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
 class BootFrame:
-    """Trama BOOT — informacion de arranque del gateway."""
+    """Trama BOOT."""
     key: str
     value: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
@@ -125,27 +147,16 @@ class BootFrame:
 
 @dataclass
 class WarnFrame:
-    """Trama WARN — advertencia del gateway."""
+    """Trama WARN."""
     warn_type: str
     detail: str
     timestamp: datetime = field(default_factory=datetime.now)
 
 
-@dataclass
-class AckFrame:
-    """
-    Trama de confirmacion de comando (compatibilidad con UI).
-    El gateway actual no envia esto, pero se mantiene para la interfaz.
-    """
-    command: str
-    result: str
-    timestamp: datetime = field(default_factory=datetime.now)
-
-
-# Tipo union para resultados del parser
+# Tipo unión
 ParsedFrame = Union[
-    DataFrame, BeaconFrame, HelloFrame, JoinFrame, TimeoutFrame,
-    LossFrame, StatsFrame, BootFrame, WarnFrame, AckFrame
+    DataFrame, TimingFrame, BeaconFrame, HelloFrame, JoinFrame,
+    TimeoutFrame, LossFrame, StatsFrame, BootFrame, WarnFrame, AckFrame
 ]
 
 
@@ -154,40 +165,18 @@ ParsedFrame = Union[
 # ============================================================
 
 class ProtocolParser:
-    """
-    Parser de protocolo para tramas del Gateway TDMA v3.
-
-    Soporta tanto lineas individuales como bloques multilinea
-    (STATS_BEGIN...STATS_END).
-
-    Uso:
-        parser = ProtocolParser()
-        frame = parser.parse("DATA_INT16,1,105,483921,12340,2048,2100")
-        if isinstance(frame, DataFrame):
-            print(f"Nodo {frame.node_id}: {frame.values}")
-    """
+    """Parser de protocolo para tramas del Gateway TDMA v4."""
 
     def __init__(self):
-        # Estado para parseo de bloques STATS multilinea
         self._in_stats_block = False
         self._stats_lines: list[str] = []
 
     def parse(self, raw_line: str) -> Optional[ParsedFrame]:
-        """
-        Parsea una linea cruda del puerto serie.
-
-        Args:
-            raw_line: Linea de texto recibida del puerto serie.
-
-        Returns:
-            Un objeto tipado segun el tipo de trama,
-            o None si la linea no se reconoce o es invalida.
-        """
         line = raw_line.strip()
         if not line:
             return None
 
-        # ---- Manejo de bloque STATS multilinea ----
+        # ---- Bloque STATS multilinea ----
         if line == "STATS_BEGIN":
             self._in_stats_block = True
             self._stats_lines = []
@@ -201,22 +190,24 @@ class ProtocolParser:
                 self._stats_lines.append(line)
                 return None
 
-        # ---- Lineas individuales ----
+        # ---- Líneas individuales ----
         try:
-            if line.startswith("DATA_INT16,"):
-                return self._parse_data(line, "int16")
-            elif line.startswith("DATA_FLOAT,"):
-                return self._parse_data(line, "float32")
+            if line.startswith("DATA,"):
+                return self._parse_data(line)
+            elif line.startswith("TIMING,"):
+                return self._parse_timing(line)
             elif line.startswith("BEACON,"):
                 return self._parse_beacon(line)
             elif line.startswith("HELLO,"):
-                return self._parse_node_event(line, "hello")
+                return self._parse_hello(line)
             elif line.startswith("NODE_JOIN,"):
                 return self._parse_node_event(line, "join")
             elif line.startswith("NODE_TIMEOUT,"):
                 return self._parse_node_event(line, "timeout")
             elif line.startswith("LOSS,"):
                 return self._parse_loss(line)
+            elif line.startswith("ACK,"):
+                return self._parse_ack(line)
             elif line.startswith("BOOT,"):
                 return self._parse_boot(line)
             elif line.startswith("WARN,"):
@@ -233,55 +224,75 @@ class ProtocolParser:
     # ============================================================
 
     @staticmethod
-    def _parse_data(line: str, encoding: str) -> DataFrame:
+    def _parse_data(line: str) -> DataFrame:
         """
-        Parsea DATA_INT16 o DATA_FLOAT.
-
-        Formato: DATA_INT16,node_id,seq,gw_rx_us,node_ts_us,val1,val2,...
+        DATA,node_id,ch_id,seq,encoding,first_idx,count,val1,val2,...
         """
         parts = line.split(",")
-        # parts[0] = "DATA_INT16" o "DATA_FLOAT"
         node_id = int(parts[1])
-        sequence = int(parts[2])
-        gw_rx_us = int(parts[3])
-        node_ts_us = int(parts[4])
+        channel_id = int(parts[2])
+        sequence = int(parts[3])
+        encoding = int(parts[4])
+        first_idx = int(parts[5])
+        count = int(parts[6])
 
-        if encoding == "float32":
-            values = [float(v) for v in parts[5:]]
-        else:
-            values = [float(int(v)) for v in parts[5:]]
+        if encoding == 2:  # FLOAT32
+            values = [float(v) for v in parts[7:]]
+        else:  # INT16
+            values = [float(int(v)) for v in parts[7:]]
 
         return DataFrame(
             node_id=node_id,
+            channel_id=channel_id,
             sequence=sequence,
-            values=values,
-            gateway_rx_us=gw_rx_us,
-            node_timestamp_us=node_ts_us,
             encoding=encoding,
+            first_sample_index=first_idx,
+            sample_count=count,
+            values=values,
+        )
+
+    @staticmethod
+    def _parse_timing(line: str) -> TimingFrame:
+        """
+        TIMING,node_id,ch_id,sample_rate_hz,dt_us,t0_epoch_ms,t0_idx
+        """
+        parts = line.split(",")
+        return TimingFrame(
+            node_id=int(parts[1]),
+            channel_id=int(parts[2]),
+            sample_rate_hz=int(parts[3]),
+            dt_us=int(parts[4]),
+            t0_epoch_ms=int(parts[5]),
+            t0_sample_index=int(parts[6]),
         )
 
     @staticmethod
     def _parse_beacon(line: str) -> BeaconFrame:
         """
-        Parsea linea BEACON.
-
-        Formato: BEACON,seq,NODES=n,SLOT_US=us,REG_MS=ms,ACKS=id:seq;id:seq
+        BEACON,seq,STATE=s,NODES=n,SLOT_US=us,RTC=ms,SCHED=id;id;...,ACKS=id:seq;...
         """
         parts = line.split(",")
         seq = int(parts[1])
-
+        state = 0
         nodes = 0
         slot_us = 0
-        reg_ms = 0
+        rtc = 0
+        schedule = []
         ack_map = {}
 
         for part in parts[2:]:
-            if part.startswith("NODES="):
+            if part.startswith("STATE="):
+                state = int(part.split("=")[1])
+            elif part.startswith("NODES="):
                 nodes = int(part.split("=")[1])
             elif part.startswith("SLOT_US="):
                 slot_us = int(part.split("=")[1])
-            elif part.startswith("REG_MS="):
-                reg_ms = int(part.split("=")[1])
+            elif part.startswith("RTC="):
+                rtc = int(part.split("=")[1])
+            elif part.startswith("SCHED="):
+                sched_str = part.split("=")[1]
+                if sched_str:
+                    schedule = [int(s) for s in sched_str.split(";") if s]
             elif part.startswith("ACKS="):
                 acks_str = part.split("=")[1]
                 if acks_str:
@@ -292,73 +303,69 @@ class ProtocolParser:
 
         return BeaconFrame(
             beacon_sequence=seq,
+            system_state=state,
             active_nodes=nodes,
             slot_us=slot_us,
-            registration_ms=reg_ms,
+            rtc_epoch_ms=rtc,
+            schedule=schedule,
             ack_map=ack_map,
         )
 
     @staticmethod
+    def _parse_hello(line: str) -> HelloFrame:
+        """
+        HELLO,node_id,mac,CH=mask,RATE=hz
+        """
+        parts = line.split(",")
+        node_id = int(parts[1])
+        mac = parts[2] if len(parts) > 2 else ""
+        ch_mask = 0
+        rate = 0
+
+        for part in parts[3:]:
+            if part.startswith("CH="):
+                ch_mask = int(part.split("=")[1], 0)  # Supports 0x prefix
+            elif part.startswith("RATE="):
+                rate = int(part.split("=")[1])
+
+        return HelloFrame(
+            node_id=node_id, mac=mac,
+            channel_mask=ch_mask, sample_rate_hz=rate,
+        )
+
+    @staticmethod
     def _parse_node_event(line: str, event_type: str):
-        """
-        Parsea HELLO, NODE_JOIN, NODE_TIMEOUT.
-
-        Formato: HELLO,node_id,mac
-                 NODE_JOIN,node_id,mac
-                 NODE_TIMEOUT,node_id,mac
-        """
         parts = line.split(",", 2)
-        # parts[0] = prefix, rest depends on type
+        node_id = int(parts[1])
+        mac = parts[2] if len(parts) > 2 else ""
 
-        if event_type == "hello":
-            # HELLO,node_id,mac
-            node_id = int(parts[1])
-            mac = parts[2] if len(parts) > 2 else ""
-            return HelloFrame(node_id=node_id, mac=mac)
-
-        elif event_type == "join":
-            # NODE_JOIN,node_id,mac
-            node_id = int(parts[1])
-            mac = parts[2] if len(parts) > 2 else ""
+        if event_type == "join":
             return JoinFrame(node_id=node_id, mac=mac)
-
         elif event_type == "timeout":
-            # NODE_TIMEOUT,node_id,mac
-            node_id = int(parts[1])
-            mac = parts[2] if len(parts) > 2 else ""
             return TimeoutFrame(node_id=node_id, mac=mac)
 
     @staticmethod
     def _parse_loss(line: str) -> LossFrame:
-        """
-        Parsea linea LOSS.
-
-        Formato: LOSS,node_id,EXPECTED=x,GOT=y
-        """
         parts = line.split(",")
         node_id = int(parts[1])
         expected = 0
         got = 0
-
         for part in parts[2:]:
             if part.startswith("EXPECTED="):
                 expected = int(part.split("=")[1])
             elif part.startswith("GOT="):
                 got = int(part.split("=")[1])
+        return LossFrame(node_id=node_id, expected_seq=expected, got_seq=got)
 
-        return LossFrame(
-            node_id=node_id,
-            expected_seq=expected,
-            got_seq=got,
-        )
+    @staticmethod
+    def _parse_ack(line: str) -> AckFrame:
+        parts = line.split(",", 2)
+        command = parts[1] if len(parts) > 1 else ""
+        result = parts[2] if len(parts) > 2 else ""
+        return AckFrame(command=command, result=result)
 
     @staticmethod
     def _parse_boot(line: str) -> BootFrame:
-        """
-        Parsea linea BOOT.
-
-        Formato: BOOT,key[,value]
-        """
         parts = line.split(",", 2)
         key = parts[1] if len(parts) > 1 else ""
         value = parts[2] if len(parts) > 2 else ""
@@ -366,50 +373,25 @@ class ProtocolParser:
 
     @staticmethod
     def _parse_warn(line: str) -> WarnFrame:
-        """
-        Parsea linea WARN.
-
-        Formato: WARN,type,detail,...
-        """
         parts = line.split(",", 2)
-        warn_type = parts[1] if len(parts) > 1 else "UNKNOWN"
-        detail = parts[2] if len(parts) > 2 else ""
-        return WarnFrame(warn_type=warn_type, detail=detail)
+        return WarnFrame(
+            warn_type=parts[1] if len(parts) > 1 else "UNKNOWN",
+            detail=parts[2] if len(parts) > 2 else "",
+        )
 
     @staticmethod
     def _parse_stats_block(lines: list[str]) -> StatsFrame:
-        """
-        Parsea un bloque STATS_BEGIN...STATS_END completo.
-
-        Lineas esperadas dentro del bloque:
-          STATS,STATE,1
-          STATS,ACTIVE_NODES,2
-          STATS,SLOT_US,440000
-          STATS,RX_OVERRUN,0
-          STATS,BEACON_TX_ERR,0
-          STATS,DIRECT_ACK_TX_ERR,0
-          NODE,1,MAC=AA:BB:...,RX=320,EMIT=315,...
-        """
         frame = StatsFrame()
-
         for line in lines:
             parts = line.split(",")
-
             if parts[0] == "STATS" and len(parts) >= 3:
-                key = parts[1]
-                val = parts[2]
-                if key == "STATE":
-                    frame.state = int(val)
-                elif key == "ACTIVE_NODES":
-                    frame.active_nodes = int(val)
-                elif key == "SLOT_US":
-                    frame.slot_us = int(val)
-                elif key == "RX_OVERRUN":
-                    frame.rx_overrun = int(val)
-                elif key == "BEACON_TX_ERR":
-                    frame.beacon_tx_err = int(val)
-                elif key == "DIRECT_ACK_TX_ERR":
-                    frame.direct_ack_tx_err = int(val)
+                key, val = parts[1], parts[2]
+                if key == "STATE":        frame.state = int(val)
+                elif key == "ACTIVE_NODES": frame.active_nodes = int(val)
+                elif key == "SLOT_US":    frame.slot_us = int(val)
+                elif key == "RX_OVERRUN": frame.rx_overrun = int(val)
+                elif key == "BEACON_TX_ERR": frame.beacon_tx_err = int(val)
+                elif key == "TX_ERR":     frame.tx_err = int(val)
 
             elif parts[0] == "NODE" and len(parts) >= 2:
                 entry = NodeStatsEntry(node_id=int(parts[1]))
@@ -417,20 +399,15 @@ class ProtocolParser:
                     if "=" not in part:
                         continue
                     k, v = part.split("=", 1)
-                    if k == "MAC":
-                        entry.mac = v
-                    elif k == "RX":
-                        entry.rx = int(v)
-                    elif k == "EMIT":
-                        entry.emit = int(v)
-                    elif k == "ACKED":
-                        entry.acked = int(v)
-                    elif k == "LOST":
-                        entry.lost = int(v)
-                    elif k == "INVALID":
-                        entry.invalid = int(v)
-                    elif k == "AGE_MS":
-                        entry.age_ms = int(v)
+                    if k == "MAC":     entry.mac = v
+                    elif k == "CH":    entry.channel_mask = int(v, 0)
+                    elif k == "RATE":  entry.sample_rate_hz = int(v)
+                    elif k == "RX":    entry.rx = int(v)
+                    elif k == "EMIT":  entry.emit = int(v)
+                    elif k == "ACKED": entry.acked = int(v)
+                    elif k == "LOST":  entry.lost = int(v)
+                    elif k == "INVALID": entry.invalid = int(v)
+                    elif k == "AGE_MS": entry.age_ms = int(v)
                 frame.nodes.append(entry)
 
         return frame

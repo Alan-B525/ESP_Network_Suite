@@ -175,6 +175,9 @@ class SerialManager:
 
             print(f"[SERIAL] Conectado a {port} @ {baudrate} baud")
 
+            # Sincronizar hora del PC con el Base Station (v4)
+            self._sync_time()
+
             if self._on_connection_change:
                 self._on_connection_change(True)
 
@@ -246,18 +249,36 @@ class SerialManager:
         """
         Inicia la adquisicion de datos.
 
-        El gateway TDMA v3 no requiere un comando START — los datos
-        fluyen automaticamente cuando los nodos se conectan. Este
-        metodo solo habilita la grabacion local.
+        Gateway TDMA v4: envía CMD_START al Base Station para que
+        los nodos cambien a estado ACQUIRING y empiecen a transmitir.
         """
+        if not self.send_command("CMD_START"):
+            print("[SERIAL] Error al enviar CMD_START")
+            return False
+
         self.is_acquiring = True
-        print("[SERIAL] Adquisicion habilitada (grabacion local)")
+        print("[SERIAL] CMD_START enviado - adquisicion iniciada")
         return True
 
     def stop_acquisition(self) -> bool:
-        """Detiene la adquisicion (grabacion local)."""
+        """
+        Detiene la adquisicion de datos.
+
+        Envía CMD_STOP al Base Station para cambiar a estado IDLE.
+        """
+        if self.is_connected:
+            self.send_command("CMD_STOP")
+
         self.is_acquiring = False
-        print("[SERIAL] Adquisicion detenida")
+        print("[SERIAL] CMD_STOP enviado - adquisicion detenida")
+        return True
+
+    def _sync_time(self):
+        """Envía la hora UTC del PC al Base Station para sincronizacion RTC."""
+        import time
+        epoch_ms = int(time.time() * 1000)
+        self.send_command(f"CMD_SET_TIME,{epoch_ms}")
+        print(f"[SERIAL] Hora sincronizada: {epoch_ms} ms")
         return True
 
     # ============================================================
