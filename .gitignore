@@ -1,0 +1,49 @@
+# ============================================================
+# ESP_Network_Suite — Monorepo .gitignore
+# ============================================================
+# Covers: PlatformIO (C++), Python (NodeLab), IDEs, AI agents
+# ============================================================
+
+# ---- PlatformIO Build Artifacts ----
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# ---- Python ----
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.env
+
+# ---- IDE / Editor ----
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- AI Agent Caches ----
+.gemini/
+.cursor/
+
+# ---- Temporary / Session Data ----
+.tmp/
+*.log
+*.sqlite3
+data_sessions/
+
+# ---- OS ----
+desktop.ini
+*.json.orig

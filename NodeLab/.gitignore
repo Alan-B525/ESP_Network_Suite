@@ -1,0 +1,30 @@
+# Entornos virtuales de Python
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+
+# Entorno y logs
+*.log
+*.sqlite3
+
+# IDES y Editores de código
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Archivos específicos de agentes de IA / Plataforma
+.gemini/
+.cursor/
+
+# Si agregas PlatformIO (C/C++ para ESP32) posteriormente:
+.pio/
+.pioenvs/
+.piolibdeps/
+*.json.orig

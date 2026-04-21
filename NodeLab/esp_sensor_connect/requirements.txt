@@ -1,0 +1,14 @@
+# ============================================================
+# ESP Sensor Connect - Dependencias del Proyecto
+# ============================================================
+# Instalar con: pip install -r requirements.txt
+# ============================================================
+
+# Framework de UI (Flutter para Python)
+flet>=0.25.0
+
+# Comunicación serie con la Base Station ESP32
+pyserial>=3.5
+
+# Procesamiento y exportación de datos tabulares
+pandas>=2.0.0
