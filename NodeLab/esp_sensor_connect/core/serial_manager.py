@@ -281,6 +281,30 @@ class SerialManager:
         print(f"[SERIAL] Hora sincronizada: {epoch_ms} ms")
         return True
 
+    def set_sample_rate(self, rate_hz: int) -> bool:
+        """
+        Configura la frecuencia de muestreo en todos los nodos.
+
+        Envía CMD_SET_RATE al Base Station, que lo incluirá en el
+        beacon. Los nodos reconfigurán su timer automáticamente.
+
+        Args:
+            rate_hz: Frecuencia de muestreo en Hz (1-10000).
+
+        Returns:
+            True si el comando fue enviado exitosamente.
+        """
+        if rate_hz < 1 or rate_hz > 10000:
+            print(f"[SERIAL] Rate fuera de rango: {rate_hz} Hz (1-10000)")
+            return False
+
+        if not self.send_command(f"CMD_SET_RATE,{rate_hz}"):
+            print("[SERIAL] Error al enviar CMD_SET_RATE")
+            return False
+
+        print(f"[SERIAL] CMD_SET_RATE,{rate_hz} enviado")
+        return True
+
     # ============================================================
     # Metodos publicos - Acceso a datos (thread-safe)
     # ============================================================

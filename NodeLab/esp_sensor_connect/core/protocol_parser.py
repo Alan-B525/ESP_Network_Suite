@@ -55,11 +55,12 @@ class TimingFrame:
 
 @dataclass
 class BeaconFrame:
-    """Trama de beacon v4 con system_state, RTC y schedule."""
+    """Trama de beacon v4 con system_state, RTC, schedule y rate."""
     beacon_sequence: int
     system_state: int = 0
     active_nodes: int = 0
     slot_us: int = 0
+    sample_rate_hz: int = 0
     rtc_epoch_ms: int = 0
     schedule: list[int] = field(default_factory=list)
     ack_map: dict = field(default_factory=dict)
@@ -276,6 +277,7 @@ class ProtocolParser:
         state = 0
         nodes = 0
         slot_us = 0
+        rate = 0
         rtc = 0
         schedule = []
         ack_map = {}
@@ -287,6 +289,8 @@ class ProtocolParser:
                 nodes = int(part.split("=")[1])
             elif part.startswith("SLOT_US="):
                 slot_us = int(part.split("=")[1])
+            elif part.startswith("RATE="):
+                rate = int(part.split("=")[1])
             elif part.startswith("RTC="):
                 rtc = int(part.split("=")[1])
             elif part.startswith("SCHED="):
@@ -306,6 +310,7 @@ class ProtocolParser:
             system_state=state,
             active_nodes=nodes,
             slot_us=slot_us,
+            sample_rate_hz=rate,
             rtc_epoch_ms=rtc,
             schedule=schedule,
             ack_map=ack_map,

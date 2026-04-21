@@ -106,12 +106,14 @@ typedef struct __attribute__((packed)) {
     uint16_t slot_us;
     uint16_t slot_guard_us;
     uint16_t registration_window_ms;
+    uint16_t sample_rate_hz;                // Tasa de muestreo objetivo (configurable)
+    uint16_t reserved_beacon;
     uint32_t beacon_sequence;
     uint64_t rtc_epoch_ms;                  // Hora UTC (Unix ms) del gateway
     uint8_t  slot_schedule[MAX_SLOTS];      // Round-robin: node_id por slot
     BeaconAckEntry ack_map[MAX_NODES];
 } BeaconSyncPacket;
-// sizeof = 1+1+1+1+2+2+2+2+4+8+10+40 = 74 bytes
+// sizeof = 1+1+1+1+2+2+2+2+2+2+4+8+10+40 = 78 bytes
 
 // ---- Node Hello (nodo → gateway) ----
 typedef struct __attribute__((packed)) {

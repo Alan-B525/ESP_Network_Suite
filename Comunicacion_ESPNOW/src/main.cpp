@@ -129,6 +129,7 @@ private:
 
     // ---- Estado del sistema ----
     uint8_t system_state_ = STATE_DISCOVERY;
+    uint16_t target_rate_hz_ = 1000;     // Default sample rate
     uint64_t rtc_epoch_ms_ = 0;
     uint32_t rtc_set_at_us_ = 0;
 
@@ -199,6 +200,14 @@ private:
             rtc_epoch_ms_ = strtoull(cmd + 13, nullptr, 10);
             rtc_set_at_us_ = micros();
             Serial.println("ACK,CMD_SET_TIME,OK");
+        } else if (strncmp(cmd, "CMD_SET_RATE,", 13) == 0) {
+            uint16_t rate = (uint16_t)atoi(cmd + 13);
+            if (rate >= 1 && rate <= 10000) {
+                target_rate_hz_ = rate;
+                Serial.printf("ACK,CMD_SET_RATE,%u\n", rate);
+            } else {
+                Serial.println("ACK,CMD_SET_RATE,ERR_RANGE");
+            }
         }
     }
 
@@ -464,6 +473,7 @@ private:
         beacon.slot_us = static_cast<uint16_t>(SLOT_US > 65535 ? 65535 : SLOT_US);
         beacon.slot_guard_us = SLOT_GUARD_US;
         beacon.registration_window_ms = REGISTRATION_WINDOW_MS;
+        beacon.sample_rate_hz = target_rate_hz_;
         beacon.beacon_sequence = beacon_sequence_++;
         beacon.rtc_epoch_ms = getCurrentEpochMs();
 

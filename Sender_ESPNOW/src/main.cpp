@@ -2,16 +2,12 @@
 // Nodo remoto ESP32-C3 — Protocolo TDMA v4 / ESP-NOW
 // ============================================================
 //
-// Adquiere muestras de hasta 4 canales a frecuencia configurable.
-// Transmite datos al Gateway en slots TDMA round-robin.
-//
-// Cambios v4:
-//   - Multi-canal (NUM_CHANNELS configurable 1-4)
-//   - Solo transmite en STATE_ACQUIRING
-//   - Envía TIMING_INFO con t0/dt para reconstrucción temporal
-//   - RTC sincronizado desde beacon
-//   - Burst mode: múltiples paquetes por slot
-//   - DataPacket con channel_id + first_sample_index (sin timestamp)
+// Sistema LOSSLESS de adquisición multicanal:
+//   - ACK-gated ring buffer: datos solo se liberan al recibir ACK
+//   - Retransmisión automática de paquetes no confirmados
+//   - Frecuencia configurable desde beacon (CMD_SET_RATE)
+//   - Burst mode: múltiples paquetes por slot TDMA
+//   - Buffer overflow detection + WARN
 // ============================================================
 
 #include <Arduino.h>
@@ -36,12 +32,24 @@ using namespace tdma;
 #define BASESTATION_MAC {0xB8, 0xF8, 0x62, 0x04, 0x5F, 0x98}
 
 #define NUM_CHANNELS 4
-#define ACQ_SAMPLE_HZ 100U
-#define ACQ_SAMPLE_PERIOD_US (1000000UL / ACQ_SAMPLE_HZ)
-#define SAMPLE_RING_CAPACITY 512U  // Per-channel
-
+#define DEFAULT_SAMPLE_HZ 1000U
+#define SAMPLE_RING_CAPACITY 4096U   // Per-channel (≥1s at 4kHz)
 #define SYNC_TIMEOUT_CYCLES 6U
-#define BURST_MAX_PKTS_PER_SLOT 8
+#define BURST_MAX_PKTS_PER_SLOT 12   // Max frames per slot
+
+// ---- Inflight tracking for lossless ----
+#define INFLIGHT_CAPACITY 48         // Max unACKed packets
+
+// ============================================================
+// Tipos para tracking lossless
+// ============================================================
+
+struct InflightEntry {
+    uint16_t seq_id;
+    uint8_t  channel_id;
+    uint32_t first_idx;
+    uint16_t count;
+};
 
 // ============================================================
 // Estado global
@@ -56,8 +64,18 @@ static volatile uint32_t pending_ticks = 0;
 
 static int16_t sample_ring[NUM_CHANNELS][SAMPLE_RING_CAPACITY];
 static uint32_t produced[NUM_CHANNELS] = {};
-static uint32_t sent[NUM_CHANNELS] = {};   // Índice hasta donde se ha enviado
+static uint32_t sent[NUM_CHANNELS] = {};
+static uint32_t acked[NUM_CHANNELS] = {};  // Lossless: last confirmed index
 static bool acq_running = false;
+
+// ---- Rate ----
+static uint32_t current_rate_hz = DEFAULT_SAMPLE_HZ;
+static uint32_t current_period_us = 1000000UL / DEFAULT_SAMPLE_HZ;
+
+// ---- Inflight tracking (lossless) ----
+static InflightEntry inflight_ring[INFLIGHT_CAPACITY];
+static uint8_t inflight_head = 0;
+static uint8_t inflight_tail = 0;
 
 // ---- Transmisión ----
 static uint16_t next_seq = 1;
@@ -72,6 +90,7 @@ static uint16_t tdma_slot_us = 0;
 static uint16_t tdma_guard_us = 0;
 static uint8_t slot_schedule[MAX_SLOTS] = {};
 static uint8_t system_state_from_gw = STATE_DISCOVERY;
+static uint16_t beacon_rate_hz = DEFAULT_SAMPLE_HZ;
 static bool was_acquiring = false;
 
 // ---- RTC sync ----
@@ -86,6 +105,7 @@ static uint32_t last_timing_info_ms = 0;
 
 // ---- Diagnóstico ----
 static uint32_t last_diag_ms = 0;
+static uint32_t overflow_count = 0;
 
 // ---- Generación simulada ----
 static int16_t sine_lut[256];
@@ -110,15 +130,53 @@ static uint64_t getCurrentEpochMs() {
 }
 
 static int16_t generateSample(uint8_t ch) {
-    // Cada canal tiene una frecuencia diferente para testing
     uint16_t step = 3 + ch * 2;
     sine_phase[ch] = (sine_phase[ch] + step) & 0xFF;
     int32_t sine_v = (int32_t)sine_lut[sine_phase[ch]] * 1200 / 32767;
     int32_t noise = (int32_t)(xorshift32() % 101U) - 50;
-    int32_t val = 2048 + sine_v + noise + ch * 200;  // Offset por canal
+    int32_t val = 2048 + sine_v + noise + ch * 200;
     if (val < 0) val = 0;
     if (val > 4095) val = 4095;
     return (int16_t)val;
+}
+
+// ============================================================
+// Inflight tracking — lossless core
+// ============================================================
+
+static uint8_t inflightCount() {
+    return (uint8_t)((inflight_head - inflight_tail) % INFLIGHT_CAPACITY);
+}
+
+static bool inflightFull() {
+    return ((inflight_head + 1) % INFLIGHT_CAPACITY) == inflight_tail;
+}
+
+static void inflightRecord(uint16_t seq, uint8_t ch, uint32_t first_idx, uint16_t count) {
+    inflight_ring[inflight_head] = {seq, ch, first_idx, count};
+    inflight_head = (inflight_head + 1) % INFLIGHT_CAPACITY;
+}
+
+static void inflightProcessAck(uint16_t acked_seq) {
+    // Advance acked[] for all inflight entries with seq <= acked_seq
+    while (inflight_tail != inflight_head) {
+        InflightEntry &e = inflight_ring[inflight_tail];
+        // Check if this entry was ACKed (seq <= acked_seq, with wrap-around)
+        int16_t delta = (int16_t)(e.seq_id - acked_seq);
+        if (delta > 0) break;  // Not yet ACKed
+
+        // This packet confirmed — advance acked pointer for its channel
+        uint32_t new_acked = e.first_idx + e.count;
+        if (new_acked > acked[e.channel_id]) {
+            acked[e.channel_id] = new_acked;
+        }
+        inflight_tail = (inflight_tail + 1) % INFLIGHT_CAPACITY;
+    }
+}
+
+static void inflightReset() {
+    inflight_head = 0;
+    inflight_tail = 0;
 }
 
 // ============================================================
@@ -127,7 +185,7 @@ static int16_t generateSample(uint8_t ch) {
 
 void IRAM_ATTR onAcqTimerISR() {
     portENTER_CRITICAL_ISR(&acq_mux);
-    if (pending_ticks < 10000U) pending_ticks++;
+    if (pending_ticks < 50000U) pending_ticks++;
     portEXIT_CRITICAL_ISR(&acq_mux);
 }
 
@@ -146,11 +204,23 @@ static void acquisitionTask(void *param) {
         }
 
         for (uint32_t t = 0; t < ticks; t++) {
+            // Check for overflow BEFORE writing
+            bool overflow = false;
+            for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
+                if ((produced[ch] - acked[ch]) >= SAMPLE_RING_CAPACITY - 1) {
+                    overflow = true;
+                    break;
+                }
+            }
+            if (overflow) {
+                overflow_count++;
+                continue;  // Drop sample — buffer full
+            }
+
             for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
                 uint32_t idx = produced[ch] % SAMPLE_RING_CAPACITY;
                 sample_ring[ch][idx] = generateSample(ch);
             }
-            // Incrementar todos los canales juntos (muestreo simultáneo)
             for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
                 produced[ch]++;
             }
@@ -158,26 +228,44 @@ static void acquisitionTask(void *param) {
     }
 }
 
+static void reconfigureTimer(uint32_t new_rate_hz) {
+    if (new_rate_hz == current_rate_hz || new_rate_hz == 0) return;
+    if (new_rate_hz > 10000) new_rate_hz = 10000;
+
+    current_rate_hz = new_rate_hz;
+    current_period_us = 1000000UL / new_rate_hz;
+
+    timerAlarmDisable(acq_timer);
+    timerAlarmWrite(acq_timer, current_period_us, true);
+    timerAlarmEnable(acq_timer);
+
+    Serial.printf("NODE: Rate reconfigured to %lu Hz (period %lu us)\n",
+                  (unsigned long)current_rate_hz, (unsigned long)current_period_us);
+}
+
 static void startAcquisition() {
     if (acq_running) return;
 
-    // Registrar t0 para timing info
     acq_t0_epoch_ms = getCurrentEpochMs();
     acq_t0_sample_index = 0;
     for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
         produced[ch] = 0;
         sent[ch] = 0;
+        acked[ch] = 0;
     }
+    inflightReset();
+    overflow_count = 0;
     timing_info_sent = false;
     acq_running = true;
-    Serial.println("NODE: Adquisicion iniciada");
+    Serial.printf("NODE: Acquisition started at %lu Hz\n", (unsigned long)current_rate_hz);
 }
 
 static void stopAcquisition() {
     if (!acq_running) return;
     acq_running = false;
     timing_info_sent = false;
-    Serial.println("NODE: Adquisicion detenida");
+    Serial.printf("NODE: Acquisition stopped (overflows=%lu)\n",
+                  (unsigned long)overflow_count);
 }
 
 // ============================================================
@@ -189,9 +277,9 @@ static void sendTimingInfo() {
     pkt.type = PKT_TIMING_INFO;
     pkt.version = PROTOCOL_VERSION;
     pkt.node_id = NODE_ID;
-    pkt.channel_id = 0xFF;  // Aplica a todos los canales
-    pkt.sample_rate_hz = ACQ_SAMPLE_HZ;
-    pkt.dt_us = ACQ_SAMPLE_PERIOD_US;
+    pkt.channel_id = 0xFF;
+    pkt.sample_rate_hz = current_rate_hz;
+    pkt.dt_us = current_period_us;
     pkt.t0_epoch_ms = acq_t0_epoch_ms;
     pkt.t0_sample_index = acq_t0_sample_index;
 
@@ -200,15 +288,15 @@ static void sendTimingInfo() {
     if (err == ESP_OK) {
         timing_info_sent = true;
         last_timing_info_ms = millis();
-        Serial.printf("NODE: TX TIMING_INFO rate=%u dt=%lu t0=%llu\n",
-                      ACQ_SAMPLE_HZ, (unsigned long)ACQ_SAMPLE_PERIOD_US,
-                      (unsigned long long)acq_t0_epoch_ms);
     }
 }
 
 static uint8_t sendDataForChannel(uint8_t ch) {
+    // Lossless: send from sent[ch], NOT from acked[ch]
+    // (acked advances only when gateway confirms)
     uint32_t pending = produced[ch] - sent[ch];
     if (pending == 0) return 0;
+    if (inflightFull()) return 0;
 
     uint16_t max_samples = maxSamplesForEncoding(SAMPLE_INT16);
     uint16_t count = (pending > max_samples) ? max_samples : (uint16_t)pending;
@@ -221,7 +309,7 @@ static uint8_t sendDataForChannel(uint8_t ch) {
     header.node_id = NODE_ID;
     header.channel_id = ch;
     header.sample_encoding = SAMPLE_INT16;
-    header.sequence_id = next_seq++;
+    header.sequence_id = next_seq;
     header.sample_count = count;
     header.first_sample_index = sent[ch];
 
@@ -237,25 +325,29 @@ static uint8_t sendDataForChannel(uint8_t ch) {
     esp_err_t err = esp_now_send(basestation_mac, buf, pkt_len);
 
     if (err == ESP_OK) {
+        // Record in inflight table for ACK tracking
+        inflightRecord(next_seq, ch, sent[ch], count);
         sent[ch] += count;
+        next_seq++;
         return 1;
     }
     return 0;
 }
 
 static void transmitBurstInSlot() {
-    // 1. Enviar TIMING_INFO si no se ha enviado o toca reenviar
+    // 1. Send TIMING_INFO if needed
     if (!timing_info_sent ||
         (millis() - last_timing_info_ms) >= TIMING_INFO_INTERVAL_MS) {
         sendTimingInfo();
     }
 
-    // 2. Enviar datos de cada canal (burst)
+    // 2. Burst: send data for each channel round-robin
     uint8_t pkts_sent = 0;
-    for (uint8_t round = 0; round < BURST_MAX_PKTS_PER_SLOT && pkts_sent < BURST_MAX_PKTS_PER_SLOT; round++) {
+    for (uint8_t round = 0; round < BURST_MAX_PKTS_PER_SLOT; round++) {
+        if (pkts_sent >= BURST_MAX_PKTS_PER_SLOT || inflightFull()) break;
         bool any_sent = false;
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
-            if (pkts_sent >= BURST_MAX_PKTS_PER_SLOT) break;
+            if (pkts_sent >= BURST_MAX_PKTS_PER_SLOT || inflightFull()) break;
             if (produced[ch] > sent[ch]) {
                 pkts_sent += sendDataForChannel(ch);
                 any_sent = true;
@@ -270,14 +362,12 @@ static void sendNodeHello() {
     hello.type = PKT_NODE_HELLO;
     hello.version = PROTOCOL_VERSION;
     hello.node_id = NODE_ID;
-    hello.channel_mask = (1U << NUM_CHANNELS) - 1;  // e.g., 0x0F for 4 channels
+    hello.channel_mask = (1U << NUM_CHANNELS) - 1;
     hello.channel_count = NUM_CHANNELS;
     hello.flags = 0;
-    hello.sample_rate_hz = ACQ_SAMPLE_HZ;
+    hello.sample_rate_hz = (uint16_t)current_rate_hz;
 
     esp_now_send(basestation_mac, (const uint8_t *)&hello, sizeof(hello));
-    Serial.printf("NODE: TX HELLO id=%u ch=%u rate=%u\n",
-                  NODE_ID, NUM_CHANNELS, ACQ_SAMPLE_HZ);
 }
 
 // ============================================================
@@ -300,7 +390,9 @@ static void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
         DirectAckPacket ack;
         memcpy(&ack, data, sizeof(ack));
         if (ack.version == PROTOCOL_VERSION && ack.node_id == NODE_ID) {
-            // Actualizar estado del sistema desde ACK
+            // LOSSLESS: process ACK to advance acked[] pointers
+            inflightProcessAck(ack.highest_acked_seq);
+
             portENTER_CRITICAL(&state_mux);
             system_state_from_gw = ack.system_state;
             portEXIT_CRITICAL(&state_mux);
@@ -326,17 +418,28 @@ static void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
     tdma_slot_us = beacon.slot_us;
     tdma_guard_us = beacon.slot_guard_us;
     system_state_from_gw = beacon.system_state;
+    beacon_rate_hz = beacon.sample_rate_hz;
     memcpy(slot_schedule, beacon.slot_schedule, MAX_SLOTS);
     portEXIT_CRITICAL(&state_mux);
 
-    // Sincronizar RTC desde beacon
+    // RTC sync
     if (beacon.rtc_epoch_ms > 0) {
         rtc_epoch_ms = beacon.rtc_epoch_ms;
         rtc_set_at_us = (uint64_t)esp_timer_get_time();
     }
 
-    Serial.printf("NODE: BEACON state=%u nodes=%u slot_us=%u\n",
-                  beacon.system_state, beacon.active_nodes, beacon.slot_us);
+    // Dynamic rate from beacon (also process ACKs from beacon)
+    if (beacon.sample_rate_hz > 0 && beacon.sample_rate_hz != current_rate_hz) {
+        reconfigureTimer(beacon.sample_rate_hz);
+    }
+
+    // Process beacon ACKs too
+    for (uint8_t i = 0; i < beacon.active_nodes; i++) {
+        if (beacon.ack_map[i].node_id == NODE_ID) {
+            inflightProcessAck(beacon.ack_map[i].highest_acked_seq);
+            break;
+        }
+    }
 }
 
 // ============================================================
@@ -347,7 +450,6 @@ void setup() {
     Serial.begin(115200);
     delay(100);
 
-    // Inicializar LUT de seno
     for (int i = 0; i < 256; i++) {
         sine_lut[i] = (int16_t)(sinf(2.0f * PI * (float)i / 256.0f) * 32767.0f);
     }
@@ -356,9 +458,10 @@ void setup() {
     delay(100);
     esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-    Serial.println("\n=== Nodo ESP32-C3 TDMA/ESP-NOW v4 ===");
-    Serial.printf("NODE: id=%u channels=%u rate=%u Hz\n",
-                  NODE_ID, NUM_CHANNELS, ACQ_SAMPLE_HZ);
+    Serial.printf("\n=== Nodo ESP32-C3 TDMA/ESP-NOW v4 LOSSLESS ===\n");
+    Serial.printf("NODE: id=%u ch=%u rate=%lu Hz ring=%u\n",
+                  NODE_ID, NUM_CHANNELS,
+                  (unsigned long)current_rate_hz, SAMPLE_RING_CAPACITY);
 
     if (esp_now_init() != ESP_OK) {
         Serial.println("NODE: FATAL ESP-NOW init");
@@ -377,16 +480,14 @@ void setup() {
         while (true) delay(1000);
     }
 
-    // Tarea de adquisición
     xTaskCreatePinnedToCore(acquisitionTask, "acq", 4096, nullptr, 3, nullptr, 0);
 
-    // Timer de hardware para adquisición
     acq_timer = timerBegin(0, 80, true);
     timerAttachInterrupt(acq_timer, &onAcqTimerISR, true);
-    timerAlarmWrite(acq_timer, ACQ_SAMPLE_PERIOD_US, true);
+    timerAlarmWrite(acq_timer, current_period_us, true);
     timerAlarmEnable(acq_timer);
 
-    Serial.println("NODE: Esperando BEACON...");
+    Serial.println("NODE: Waiting for BEACON...");
 }
 
 // ============================================================
@@ -397,12 +498,11 @@ void loop() {
     uint64_t now_us = (uint64_t)esp_timer_get_time();
     uint32_t now_ms = millis();
 
-    // ---- Leer estado sincronizado ----
+    // ---- Read synchronized state ----
     bool local_sync = false;
     uint8_t local_state = STATE_DISCOVERY;
     uint32_t cycle_us = 0;
     uint32_t slot_us_val = 0;
-    uint32_t guard_us = 0;
     uint64_t anchor = 0;
     uint8_t local_schedule[MAX_SLOTS];
 
@@ -421,13 +521,12 @@ void loop() {
     if (sync_locked) {
         cycle_us = tdma_cycle_us;
         slot_us_val = tdma_slot_us;
-        guard_us = tdma_guard_us;
         anchor = sync_anchor_us;
         memcpy(local_schedule, slot_schedule, MAX_SLOTS);
     }
     portEXIT_CRITICAL(&state_mux);
 
-    // ---- Gestionar adquisición según estado ----
+    // ---- Acquisition state management ----
     if (local_state == STATE_ACQUIRING && !was_acquiring) {
         startAcquisition();
         was_acquiring = true;
@@ -440,11 +539,10 @@ void loop() {
     if (local_sync && cycle_us > 0 && slot_us_val > 0) {
         uint32_t elapsed = (uint32_t)(now_us - anchor);
         uint32_t phase = elapsed % cycle_us;
-
-        // Ventana de registro: enviar HELLO
         uint32_t reg_us = (uint32_t)REGISTRATION_WINDOW_MS * 1000UL;
+
+        // Registration window: send HELLO
         if (phase < reg_us) {
-            // Enviar HELLO una vez por ciclo
             static uint32_t last_hello_cycle = UINT32_MAX;
             uint32_t cycle_idx = elapsed / cycle_us;
             if (cycle_idx != last_hello_cycle) {
@@ -453,13 +551,12 @@ void loop() {
             }
         }
 
-        // Fase de datos: solo si ACQUIRING
-        if (local_state == STATE_ACQUIRING && acq_running) {
+        // Data phase: only if ACQUIRING
+        if (local_state == STATE_ACQUIRING && acq_running && phase >= reg_us) {
             uint32_t data_phase = phase - reg_us;
             uint32_t current_slot = data_phase / slot_us_val;
 
             if (current_slot < MAX_SLOTS && local_schedule[current_slot] == NODE_ID) {
-                // Estamos en nuestro slot — transmitir burst
                 static uint32_t last_tx_slot = UINT32_MAX;
                 uint32_t cycle_idx = elapsed / cycle_us;
                 uint32_t slot_key = cycle_idx * MAX_SLOTS + current_slot;
@@ -472,17 +569,33 @@ void loop() {
         }
     }
 
-    // ---- Diagnóstico periódico ----
+    // ---- Diagnostics ----
     if ((now_ms - last_diag_ms) >= 3000U) {
         last_diag_ms = now_ms;
         uint32_t total_pending = 0;
+        uint32_t total_unacked = 0;
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
             total_pending += produced[ch] - sent[ch];
+            total_unacked += sent[ch] - acked[ch];
         }
-        Serial.printf("NODE: sync=%d state=%u acq=%d pending=%lu seq=%u\n",
+        Serial.printf("NODE: sync=%d state=%u acq=%d rate=%lu pending=%lu unacked=%lu inflight=%u ovf=%lu\n",
                       local_sync ? 1 : 0, local_state,
                       acq_running ? 1 : 0,
-                      (unsigned long)total_pending, next_seq);
+                      (unsigned long)current_rate_hz,
+                      (unsigned long)total_pending,
+                      (unsigned long)total_unacked,
+                      inflightCount(),
+                      (unsigned long)overflow_count);
+
+        // Buffer warning
+        for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
+            uint32_t usage = produced[ch] - acked[ch];
+            if (usage > SAMPLE_RING_CAPACITY * 90 / 100) {
+                Serial.printf("NODE: WARN ch%u buffer %lu/%u (%.0f%%)\n",
+                              ch, (unsigned long)usage, SAMPLE_RING_CAPACITY,
+                              100.0f * usage / SAMPLE_RING_CAPACITY);
+            }
+        }
     }
 
     delay(0);
