@@ -43,6 +43,7 @@ class ConfigView(ft.Column):
         self._config_file = "app_config.json"
         
         self._load_config()
+        self._serial_manager.set_on_raw_line(self._on_serial_line)
 
         # ============================================================
         # SECCION 1: Conexion Serie
@@ -485,6 +486,9 @@ class ConfigView(ft.Column):
     # ============================================================
     # Utilidades
     # ============================================================
+
+    def _on_serial_line(self, line: str):
+        self._log(f'RX: {line}')
 
     def _show_snackbar(self, message: str, color: str = TEXT_PRIMARY):
         try:

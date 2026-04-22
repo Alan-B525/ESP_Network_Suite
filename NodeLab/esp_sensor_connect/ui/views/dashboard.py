@@ -294,22 +294,12 @@ class DashboardView(ft.Column):
         all_node_data = {}
         all_flat = []
         for nid in node_ids:
-            pts = self._serial_manager.get_node_data(nid, self.MAX_CHART_POINTS)
-            if not pts:
+            vals = self._serial_manager.get_node_data(nid, self._value_index, self.MAX_CHART_POINTS)
+            if not vals:
                 continue
-            # Filtrar por el canal seleccionado
-            channel_pts = [p for p in pts if p.channel_id == self._value_index]
-            
-            vals = []
-            for p in channel_pts:
-                vals.extend(p.values)
-                
-            if len(vals) > self.MAX_CHART_POINTS:
-                vals = vals[-self.MAX_CHART_POINTS:]
 
-            if vals:
-                all_node_data[nid] = vals
-                all_flat.extend(vals)
+            all_node_data[nid] = vals
+            all_flat.extend(vals)
 
         if not all_flat:
             if not self._no_data_overlay.visible:
@@ -356,7 +346,7 @@ class DashboardView(ft.Column):
             ))
             shapes.append(cv.Text(
                 x=-48, y=gy - 6,
-                text=f"{yv:.1f}",
+                value=f"{yv:.1f}",
                 style=ft.TextStyle(size=9, color=TEXT_TERTIARY,
                                    font_family=FONT_MONO),
             ))
@@ -371,7 +361,7 @@ class DashboardView(ft.Column):
             ))
             shapes.append(cv.Text(
                 x=gx - 6, y=h + 6,
-                text=str(xl),
+                value=str(xl),
                 style=ft.TextStyle(size=9, color=TEXT_TERTIARY,
                                    font_family=FONT_MONO),
             ))

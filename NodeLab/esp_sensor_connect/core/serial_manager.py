@@ -78,9 +78,10 @@ class SerialManager:
         self.active_nodes: list[str] = []  # MACs
         self.nodes_count: int = 0
 
-        # ---- Buffer circular de datos por nodo (para la UI) ----
-        # Estructura: {node_id: [DataFrame, DataFrame, ...]}
-        self._node_data_buffer: dict[int, list[DataFrame]] = {}
+        # ---- Buffer circular de datos por nodo/canal (para la UI) ----
+        # Estructura: {node_id: {channel_id: [float, float, ...]}}
+        # Se guarda una sola muestra (promedio o min/max) por cada paquete recibido
+        self._node_data_buffer: dict[int, dict[int, list[float]]] = {}
         self._buffer_max_size = 200  # Puntos maximos por nodo en memoria
 
         # ---- Contadores para deteccion de perdida de paquetes ----
@@ -116,6 +117,7 @@ class SerialManager:
         self._on_ack_callback: Optional[Callable] = None
         self._on_connection_change: Optional[Callable] = None
         self._on_node_event: Optional[Callable] = None
+        self._on_raw_line_callback: Optional[Callable] = None
 
         # ---- Parser de protocolo ----
         self._parser = ProtocolParser()
@@ -354,14 +356,14 @@ class SerialManager:
     # Metodos publicos - Acceso a datos (thread-safe)
     # ============================================================
 
-    def get_node_data(self, node_id: int, count: int = 100) -> list[DataFrame]:
+    def get_node_data(self, node_id: int, channel_id: int, count: int = 100) -> list[float]:
         """
-        Obtiene los ultimos N datos de un nodo especifico.
+        Obtiene los ultimos N datos decimados de un nodo y canal especifico.
 
         Thread-safe: usa Lock para acceder al buffer compartido.
         """
         with self._lock:
-            buffer = self._node_data_buffer.get(node_id, [])
+            buffer = self._node_data_buffer.get(node_id, {}).get(channel_id, [])
             return list(buffer[-count:])
 
     def get_all_node_ids(self) -> list[int]:
@@ -413,9 +415,30 @@ class SerialManager:
         """Registra callback para JOIN/TIMEOUT/HELLO events."""
         self._on_node_event = callback
 
+    def set_on_raw_line(self, callback: Callable):
+        """Registra callback para texto raw (omite DATA y BEACON)."""
+        self._on_raw_line_callback = callback
+
     # ============================================================
     # Hilo de lectura (ejecucion en background)
     # ============================================================
+
+    def _cobs_decode(self, data: bytes) -> bytes:
+        decoded = bytearray()
+        i = 0
+        while i < len(data):
+            code = data[i]
+            if code == 0:
+                break
+            i += 1
+            for _ in range(1, code):
+                if i >= len(data):
+                    break
+                decoded.append(data[i])
+                i += 1
+            if code < 0xFF and i < len(data):
+                decoded.append(0)
+        return bytes(decoded)
 
     def _reader_loop(self):
         """
@@ -431,14 +454,31 @@ class SerialManager:
                     continue
 
                 if self._serial.in_waiting > 0:
-                    raw_line = self._serial.readline().decode(
-                        'utf-8', errors='replace'
-                    )
+                    raw_data = self._serial.read_until(b'\x00')
+                    if not raw_data or raw_data[-1] != 0:
+                        continue
+                        
+                    # Remove the 0x00 delimiter
+                    raw_data = raw_data[:-1]
+                    if not raw_data:
+                        continue
+                        
+                    decoded = self._cobs_decode(raw_data)
+                    if not decoded:
+                        continue
 
-                    if raw_line.strip():
-                        frame = self._parser.parse(raw_line)
-                        if frame is not None:
-                            self._dispatch_frame(frame)
+                    # If it's ASCII (0x01), we can still trigger _on_raw_line_callback
+                    if decoded[0] == 0x01 and self._on_raw_line_callback:
+                        try:
+                            line_str = decoded[1:].decode('utf-8', errors='replace').strip()
+                            if not line_str.startswith("DATA,") and not line_str.startswith("BEACON,"):
+                                self._on_raw_line_callback(line_str)
+                        except Exception:
+                            pass
+
+                    frame = self._parser.parse_decoded(decoded)
+                    if frame is not None:
+                        self._dispatch_frame(frame)
                 else:
                     time.sleep(0.001)
 
@@ -523,16 +563,21 @@ class SerialManager:
                 self.packet_loss[node_id] += lost
         self._last_sequence[node_id] = frame.sequence
 
-        # 3. Actualizar buffer circular por nodo
+        # 3. Actualizar buffer circular por nodo y canal (Downsampling)
         with self._lock:
             if node_id not in self._node_data_buffer:
-                self._node_data_buffer[node_id] = []
+                self._node_data_buffer[node_id] = {}
+            if frame.channel_id not in self._node_data_buffer[node_id]:
+                self._node_data_buffer[node_id][frame.channel_id] = []
 
-            self._node_data_buffer[node_id].append(frame)
+            # Decimación: tomar el promedio de los valores de la trama
+            if frame.values:
+                avg_val = sum(frame.values) / len(frame.values)
+                self._node_data_buffer[node_id][frame.channel_id].append(avg_val)
 
-            if len(self._node_data_buffer[node_id]) > self._buffer_max_size:
-                self._node_data_buffer[node_id] = \
-                    self._node_data_buffer[node_id][-self._buffer_max_size:]
+                if len(self._node_data_buffer[node_id][frame.channel_id]) > self._buffer_max_size:
+                    self._node_data_buffer[node_id][frame.channel_id] = \
+                        self._node_data_buffer[node_id][frame.channel_id][-self._buffer_max_size:]
 
     def _handle_timing_frame(self, frame: TimingFrame):
         """Procesa TIMING_INFO: almacena t0/dt por nodo+canal para reconstrucción temporal."""

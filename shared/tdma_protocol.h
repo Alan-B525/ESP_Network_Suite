@@ -86,9 +86,16 @@ enum PacketType : uint8_t {
     PKT_TIMING_INFO  = 0x15,
 };
 
+enum SerialMsgType : uint8_t {
+    SER_MSG_ASCII  = 0x01,  // Text logs, events, stats
+    SER_MSG_DATA   = 0x02,  // High-speed DATA packet
+    SER_MSG_TIMING = 0x03,  // TIMING_INFO packet
+};
+
 enum SampleEncoding : uint8_t {
     SAMPLE_INT16   = 1,
     SAMPLE_FLOAT32 = 2,
+    SAMPLE_DELTA_8BIT = 3, // 1st is int16, rest are int8 deltas
 };
 
 // ============================================================
@@ -193,6 +200,7 @@ inline uint8_t sampleSizeBytes(uint8_t encoding) {
     switch (encoding) {
         case SAMPLE_INT16:   return sizeof(int16_t);
         case SAMPLE_FLOAT32: return sizeof(float);
+        case SAMPLE_DELTA_8BIT: return 1; // It's variable actually, but mostly 1.
         default:             return 0;
     }
 }
@@ -202,14 +210,23 @@ inline bool isSupportedEncoding(uint8_t encoding) {
 }
 
 inline size_t dataPacketExpectedLength(const DataPacketHeader &header) {
+    if (header.sample_count == 0) return DATA_HEADER_SIZE;
+    if (header.sample_encoding == SAMPLE_DELTA_8BIT) {
+        return DATA_HEADER_SIZE + 2 + (header.sample_count - 1);
+    }
     uint8_t bps = sampleSizeBytes(header.sample_encoding);
     if (bps == 0) return 0;
     return DATA_HEADER_SIZE + static_cast<size_t>(header.sample_count) * bps;
 }
 
 inline uint16_t maxSamplesForEncoding(uint8_t encoding) {
+    if (DATA_HEADER_SIZE >= ESPNOW_MAX_PAYLOAD_BYTES) return 0;
+    if (encoding == SAMPLE_DELTA_8BIT) {
+        // 2 bytes for base, remaining for deltas
+        return 1 + (ESPNOW_MAX_PAYLOAD_BYTES - DATA_HEADER_SIZE - 2);
+    }
     uint8_t bps = sampleSizeBytes(encoding);
-    if (bps == 0 || DATA_HEADER_SIZE >= ESPNOW_MAX_PAYLOAD_BYTES) return 0;
+    if (bps == 0) return 0;
     return static_cast<uint16_t>((ESPNOW_MAX_PAYLOAD_BYTES - DATA_HEADER_SIZE) / bps);
 }
 
@@ -248,6 +265,36 @@ inline uint8_t countSlotsForNode(const uint8_t *schedule, uint8_t node_id) {
 
 inline bool isSequenceNewer(uint16_t candidate, uint16_t reference) {
     return static_cast<int16_t>(candidate - reference) > 0;
+}
+
+// ============================================================
+// COBS Encoding (Para comunicación Serial Binaria)
+// ============================================================
+inline size_t cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) {
+    size_t read_index = 0;
+    size_t write_index = 1;
+    size_t code_index = 0;
+    uint8_t code = 1;
+
+    while (read_index < length) {
+        if (ptr[read_index] == 0) {
+            dst[code_index] = code;
+            code = 1;
+            code_index = write_index++;
+            read_index++;
+        } else {
+            dst[write_index++] = ptr[read_index++];
+            code++;
+            if (code == 0xFF) {
+                dst[code_index] = code;
+                code = 1;
+                code_index = write_index++;
+            }
+        }
+    }
+    dst[code_index] = code;
+    dst[write_index++] = 0; // Delimiter
+    return write_index;
 }
 
 } // namespace tdma

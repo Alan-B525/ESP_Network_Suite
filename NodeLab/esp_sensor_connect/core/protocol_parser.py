@@ -22,6 +22,7 @@ Tramas soportadas:
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Union
+import struct
 
 
 # ============================================================
@@ -171,6 +172,76 @@ class ProtocolParser:
     def __init__(self):
         self._in_stats_block = False
         self._stats_lines: list[str] = []
+
+    def parse_decoded(self, data: bytes) -> Optional[ParsedFrame]:
+        if not data:
+            return None
+            
+        msg_type = data[0]
+        payload = data[1:]
+        
+        if msg_type == 0x01: # SER_MSG_ASCII
+            try:
+                line = payload.decode('utf-8', errors='replace')
+                return self.parse(line)
+            except Exception as e:
+                print(f"[PARSER] Error decoding ASCII: {e}")
+                return None
+                
+        elif msg_type == 0x02: # SER_MSG_DATA
+            if len(payload) < 14:
+                return None
+            # uint8 type, version, node_id, channel_id, encoding, reserved
+            # uint16 sequence_id, sample_count
+            # uint32 first_sample_index
+            header = struct.unpack('<BBBBBBHHI', payload[:14])
+            
+            node_id = header[2]
+            channel_id = header[3]
+            encoding = header[4]
+            sequence = header[6]
+            sample_count = header[7]
+            first_idx = header[8]
+            
+            samples_data = payload[14:]
+            values = []
+            if encoding == 2: # FLOAT32
+                if len(samples_data) >= sample_count * 4:
+                    values = list(struct.unpack(f'<{sample_count}f', samples_data[:sample_count*4]))
+            elif encoding == 3: # DELTA_8BIT
+                if sample_count > 0 and len(samples_data) >= 2 + (sample_count - 1):
+                    base_val = struct.unpack('<h', samples_data[:2])[0]
+                    values.append(float(base_val))
+                    if sample_count > 1:
+                        deltas = struct.unpack(f'<{sample_count-1}b', samples_data[2:2+(sample_count-1)])
+                        current = base_val
+                        for d in deltas:
+                            current += d
+                            values.append(float(current))
+            else: # INT16
+                if len(samples_data) >= sample_count * 2:
+                    values = list(struct.unpack(f'<{sample_count}h', samples_data[:sample_count*2]))
+                    
+            return DataFrame(node_id, channel_id, sequence, encoding, first_idx, sample_count, values)
+            
+        elif msg_type == 0x03: # SER_MSG_TIMING
+            if len(payload) < 24:
+                return None
+            # uint8 type, version, node_id, channel_id
+            # uint32 sample_rate, dt_us
+            # uint64 t0_epoch
+            # uint32 t0_sample_idx
+            header = struct.unpack('<BBBBIIQI', payload[:24])
+            return TimingFrame(
+                node_id=header[2],
+                channel_id=header[3],
+                sample_rate_hz=header[4],
+                dt_us=header[5],
+                t0_epoch_ms=header[6],
+                t0_sample_index=header[7]
+            )
+            
+        return None
 
     def parse(self, raw_line: str) -> Optional[ParsedFrame]:
         line = raw_line.strip()

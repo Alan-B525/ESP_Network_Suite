@@ -337,8 +337,25 @@ static uint8_t sendDataForChannel(uint8_t ch) {
     if (pending == 0) return 0;
     if (inflightFull()) return 0;
 
-    uint16_t max_samples = maxSamplesForEncoding(SAMPLE_INT16);
-    uint16_t count = (pending > max_samples) ? max_samples : (uint16_t)pending;
+    uint16_t count = (pending > maxSamplesForEncoding(SAMPLE_DELTA_8BIT)) 
+                   ? maxSamplesForEncoding(SAMPLE_DELTA_8BIT) 
+                   : (uint16_t)pending;
+
+    uint8_t encoding = SAMPLE_DELTA_8BIT;
+    int16_t prev_val = sample_ring[ch][sent[ch] % SAMPLE_RING_CAPACITY];
+    
+    for(uint16_t i = 1; i < count; i++) {
+        int16_t val = sample_ring[ch][(sent[ch] + i) % SAMPLE_RING_CAPACITY];
+        int32_t diff = (int32_t)val - (int32_t)prev_val;
+        if(diff < -128 || diff > 127) {
+            encoding = SAMPLE_INT16;
+            count = (pending > maxSamplesForEncoding(SAMPLE_INT16)) 
+                  ? maxSamplesForEncoding(SAMPLE_INT16) 
+                  : (uint16_t)pending;
+            break;
+        }
+        prev_val = val;
+    }
 
     uint8_t buf[ESPNOW_MAX_PAYLOAD_BYTES];
 
@@ -347,20 +364,31 @@ static uint8_t sendDataForChannel(uint8_t ch) {
     header.version = PROTOCOL_VERSION;
     header.node_id = NODE_ID;
     header.channel_id = ch;
-    header.sample_encoding = SAMPLE_INT16;
+    header.sample_encoding = encoding;
     header.sequence_id = next_seq;
     header.sample_count = count;
     header.first_sample_index = sent[ch];
 
     memcpy(buf, &header, DATA_HEADER_SIZE);
 
-    for (uint16_t i = 0; i < count; i++) {
-        uint32_t idx = (sent[ch] + i) % SAMPLE_RING_CAPACITY;
-        int16_t val = sample_ring[ch][idx];
-        memcpy(buf + DATA_HEADER_SIZE + i * sizeof(int16_t), &val, sizeof(int16_t));
+    if (encoding == SAMPLE_DELTA_8BIT) {
+        int16_t base_val = sample_ring[ch][sent[ch] % SAMPLE_RING_CAPACITY];
+        memcpy(buf + DATA_HEADER_SIZE, &base_val, sizeof(int16_t));
+        int16_t p_val = base_val;
+        for (uint16_t i = 1; i < count; i++) {
+            int16_t val = sample_ring[ch][(sent[ch] + i) % SAMPLE_RING_CAPACITY];
+            int8_t delta = (int8_t)(val - p_val);
+            buf[DATA_HEADER_SIZE + 2 + (i - 1)] = (uint8_t)delta;
+            p_val = val;
+        }
+    } else {
+        for (uint16_t i = 0; i < count; i++) {
+            int16_t val = sample_ring[ch][(sent[ch] + i) % SAMPLE_RING_CAPACITY];
+            memcpy(buf + DATA_HEADER_SIZE + i * sizeof(int16_t), &val, sizeof(int16_t));
+        }
     }
 
-    size_t pkt_len = DATA_HEADER_SIZE + count * sizeof(int16_t);
+    size_t pkt_len = dataPacketExpectedLength(header);
     esp_err_t err = esp_now_send(basestation_mac, buf, pkt_len);
 
     if (err == ESP_OK) {

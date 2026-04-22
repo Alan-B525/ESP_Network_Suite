@@ -79,12 +79,12 @@ public:
         esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
         if (esp_now_init() != ESP_OK) {
-            Serial.println("FATAL,ESP_NOW_INIT_FAILED");
+            sendAsciiMsg("FATAL,ESP_NOW_INIT_FAILED");
             while (true) delay(1000);
         }
 
         if (!addBroadcastPeer()) {
-            Serial.println("WARN,BROADCAST_PEER_ADD_FAILED");
+            sendAsciiMsg("WARN,BROADCAST_PEER_ADD_FAILED");
         }
 
         s_instance = this;
@@ -171,6 +171,30 @@ private:
     char cmd_buf_[SERIAL_CMD_BUF_LEN] = {};
     uint8_t cmd_len_ = 0;
 
+    // ---- Emisión serial binaria ----
+    void sendBinaryMsg(SerialMsgType type, const uint8_t *payload, size_t len) {
+        uint8_t raw_buf[len + 1];
+        raw_buf[0] = type;
+        if (len > 0 && payload) memcpy(raw_buf + 1, payload, len);
+
+        size_t cobs_max = len + 1 + (len + 1) / 254 + 2;
+        uint8_t cobs_buf[cobs_max];
+        size_t cobs_len = tdma::cobsEncode(raw_buf, len + 1, cobs_buf);
+
+        Serial.write(cobs_buf, cobs_len);
+    }
+
+    void sendAsciiMsg(const char *fmt, ...) {
+        char buf[256];
+        va_list args;
+        va_start(args, fmt);
+        int len = vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+        if (len > 0) {
+            sendBinaryMsg(SER_MSG_ASCII, (const uint8_t*)buf, len);
+        }
+    }
+
     // ============================================================
     // Serial Commands (PC → Gateway)
     // ============================================================
@@ -193,21 +217,21 @@ private:
     void processCommand(const char *cmd) {
         if (strcmp(cmd, "CMD_START") == 0) {
             system_state_ = STATE_ACQUIRING;
-            Serial.println("ACK,CMD_START,OK");
+            sendAsciiMsg("ACK,CMD_START,OK");
         } else if (strcmp(cmd, "CMD_STOP") == 0) {
             system_state_ = STATE_IDLE;
-            Serial.println("ACK,CMD_STOP,OK");
+            sendAsciiMsg("ACK,CMD_STOP,OK");
         } else if (strncmp(cmd, "CMD_SET_TIME,", 13) == 0) {
             rtc_epoch_ms_ = strtoull(cmd + 13, nullptr, 10);
             rtc_set_at_us_ = micros();
-            Serial.println("ACK,CMD_SET_TIME,OK");
+            sendAsciiMsg("ACK,CMD_SET_TIME,OK");
         } else if (strncmp(cmd, "CMD_SET_RATE,", 13) == 0) {
             uint16_t rate = (uint16_t)atoi(cmd + 13);
             if (rate >= 1 && rate <= 10000) {
                 target_rate_hz_ = rate;
-                Serial.printf("ACK,CMD_SET_RATE,%u\n", rate);
+                sendAsciiMsg("ACK,CMD_SET_RATE,%u", rate);
             } else {
-                Serial.println("ACK,CMD_SET_RATE,ERR_RANGE");
+                sendAsciiMsg("ACK,CMD_SET_RATE,ERR_RANGE");
             }
         }
     }
@@ -339,7 +363,7 @@ private:
 
         char mac_text[18] = {};
         formatMac(node->mac, mac_text, sizeof(mac_text));
-        Serial.printf("HELLO,%u,%s,CH=0x%02X,RATE=%u\n",
+        sendAsciiMsg("HELLO,%u,%s,CH=0x%02X,RATE=%u",
                       node->node_id, mac_text,
                       node->channel_mask, node->sample_rate_hz);
     }
@@ -382,7 +406,7 @@ private:
                 // NO avanzamos highest_seq_acked para forzar la retransmisión
                 node->lost_packets += delta; // Solo para estadísticas de red
                 should_emit = false;
-                Serial.printf("LOSS,%u,EXPECTED=%u,GOT=%u\n",
+                sendAsciiMsg("LOSS,%u,EXPECTED=%u,GOT=%u",
                               node->node_id, expected_next, header.sequence_id);
             }
             // delta < 0: duplicado, se ignora payload pero se re-ACKea
@@ -396,7 +420,7 @@ private:
         sendDirectAck(*node, frame.rx_us);
 
         if (should_emit) {
-            emitDataCsv(*node, header, frame.payload + DATA_HEADER_SIZE);
+            emitDataBinary(*node, header, frame.payload + DATA_HEADER_SIZE);
             node->emitted_packets++;
             pulseRxLed();
         }
@@ -412,53 +436,25 @@ private:
         ActiveNodeEntry *node = findNodeById(timing.node_id);
         if (node) node->last_seen_ms = millis();
 
-        // Reenviar al PC como línea serial
-        Serial.printf("TIMING,%u,%u,%lu,%lu,%llu,%lu\n",
-                      timing.node_id,
-                      timing.channel_id,
-                      (unsigned long)timing.sample_rate_hz,
-                      (unsigned long)timing.dt_us,
-                      (unsigned long long)timing.t0_epoch_ms,
-                      (unsigned long)timing.t0_sample_index);
+        // Reenviar al PC como trama binaria
+        sendBinaryMsg(SER_MSG_TIMING, (const uint8_t*)&timing, sizeof(timing));
     }
 
     // ============================================================
     // Emisión serial
     // ============================================================
 
-    void emitDataCsv(const ActiveNodeEntry &node,
+    void emitDataBinary(const ActiveNodeEntry &node,
                      const DataPacketHeader &header,
                      const uint8_t *payload) {
-        // DATA,node_id,ch_id,seq,encoding,first_idx,sample_count,val1,val2,...
-        Serial.print("DATA,");
-        Serial.print(node.node_id);
-        Serial.print(",");
-        Serial.print(header.channel_id);
-        Serial.print(",");
-        Serial.print(header.sequence_id);
-        Serial.print(",");
-        Serial.print(header.sample_encoding);
-        Serial.print(",");
-        Serial.print(header.first_sample_index);
-        Serial.print(",");
-        Serial.print(header.sample_count);
-
-        if (header.sample_encoding == SAMPLE_INT16) {
-            for (uint16_t i = 0; i < header.sample_count; i++) {
-                int16_t val = 0;
-                memcpy(&val, payload + (i * sizeof(int16_t)), sizeof(int16_t));
-                Serial.print(",");
-                Serial.print(val);
-            }
-        } else if (header.sample_encoding == SAMPLE_FLOAT32) {
-            for (uint16_t i = 0; i < header.sample_count; i++) {
-                float val = 0.0f;
-                memcpy(&val, payload + (i * sizeof(float)), sizeof(float));
-                Serial.print(",");
-                Serial.print(val, 6);
-            }
-        }
-        Serial.println();
+        size_t payload_len = header.sample_count * sampleSizeBytes(header.sample_encoding);
+        size_t total_len = DATA_HEADER_SIZE + payload_len;
+        
+        uint8_t msg_buf[total_len];
+        memcpy(msg_buf, &header, DATA_HEADER_SIZE);
+        memcpy(msg_buf + DATA_HEADER_SIZE, payload, payload_len);
+        
+        sendBinaryMsg(SER_MSG_DATA, msg_buf, total_len);
     }
 
     // ============================================================
@@ -494,8 +490,10 @@ private:
                                       sizeof(beacon));
         if (err != ESP_OK) beacon_errors_++;
 
-        // Imprimir beacon info al serial
-        Serial.printf("BEACON,%lu,STATE=%u,NODES=%u,SLOT_US=%u,RATE=%u,RTC=%llu,SCHED=",
+        // Construir string de beacon
+        char beacon_info[256];
+        int len = snprintf(beacon_info, sizeof(beacon_info), 
+                      "BEACON,%lu,STATE=%u,NODES=%u,SLOT_US=%u,RATE=%u,RTC=%llu,SCHED=",
                       (unsigned long)beacon.beacon_sequence,
                       beacon.system_state,
                       beacon.active_nodes,
@@ -504,18 +502,17 @@ private:
                       (unsigned long long)beacon.rtc_epoch_ms);
 
         for (uint8_t i = 0; i < MAX_SLOTS; i++) {
-            if (i > 0) Serial.print(";");
-            Serial.print(slot_schedule_[i]);
+            if (i > 0) len += snprintf(beacon_info + len, sizeof(beacon_info) - len, ";");
+            len += snprintf(beacon_info + len, sizeof(beacon_info) - len, "%u", slot_schedule_[i]);
         }
 
-        Serial.print(",ACKS=");
+        len += snprintf(beacon_info + len, sizeof(beacon_info) - len, ",ACKS=");
         for (uint8_t i = 0; i < active_count_; i++) {
-            if (i > 0) Serial.print(";");
-            Serial.print(beacon.ack_map[i].node_id);
-            Serial.print(":");
-            Serial.print(beacon.ack_map[i].highest_acked_seq);
+            if (i > 0) len += snprintf(beacon_info + len, sizeof(beacon_info) - len, ";");
+            len += snprintf(beacon_info + len, sizeof(beacon_info) - len, "%u:%u", 
+                            beacon.ack_map[i].node_id, beacon.ack_map[i].highest_acked_seq);
         }
-        Serial.println();
+        sendAsciiMsg("%s", beacon_info);
     }
 
     void sendDirectAck(const ActiveNodeEntry &node, uint32_t rx_us) {
@@ -541,7 +538,7 @@ private:
             if ((now_ms - nodes_[i].last_seen_ms) > NODE_INACTIVE_TIMEOUT_MS) {
                 char mac_text[18] = {};
                 formatMac(nodes_[i].mac, mac_text, sizeof(mac_text));
-                Serial.printf("NODE_TIMEOUT,%u,%s\n", nodes_[i].node_id, mac_text);
+                sendAsciiMsg("NODE_TIMEOUT,%u,%s", nodes_[i].node_id, mac_text);
                 memset(&nodes_[i], 0, sizeof(nodes_[i]));
             }
         }
@@ -581,7 +578,7 @@ private:
 
             char mac_text[18] = {};
             formatMac(mac, mac_text, sizeof(mac_text));
-            Serial.printf("NODE_JOIN,%u,%s\n", node_id, mac_text);
+            sendAsciiMsg("NODE_JOIN,%u,%s", node_id, mac_text);
             return &nodes_[i];
         }
         return nullptr;
@@ -640,32 +637,32 @@ private:
     // ============================================================
 
     void printStartupInfo() {
-        Serial.println("BOOT,ESP32C3_TDMA_GATEWAY_V4");
-        Serial.printf("BOOT,MAC,%s\n", WiFi.macAddress().c_str());
-        Serial.printf("BOOT,CHANNEL,%d\n", WIFI_CHANNEL);
-        Serial.printf("BOOT,CYCLE_MS,%u\n", CYCLE_MS);
-        Serial.printf("BOOT,REG_MS,%u\n", REGISTRATION_WINDOW_MS);
-        Serial.printf("BOOT,MAX_NODES,%u\n", MAX_NODES);
-        Serial.printf("BOOT,MAX_SLOTS,%u\n", MAX_SLOTS);
-        Serial.printf("BOOT,SLOT_US,%lu\n", (unsigned long)SLOT_US);
-        Serial.printf("BOOT,MAX_CHANNELS,%u\n", MAX_CHANNELS_PER_NODE);
-        Serial.println("BOOT,SERIAL_FORMAT,DATA,node_id,ch_id,seq,enc,first_idx,count,vals...");
+        sendAsciiMsg("BOOT,ESP32C3_TDMA_GATEWAY_V4");
+        sendAsciiMsg("BOOT,MAC,%s", WiFi.macAddress().c_str());
+        sendAsciiMsg("BOOT,CHANNEL,%d", WIFI_CHANNEL);
+        sendAsciiMsg("BOOT,CYCLE_MS,%u", CYCLE_MS);
+        sendAsciiMsg("BOOT,REG_MS,%u", REGISTRATION_WINDOW_MS);
+        sendAsciiMsg("BOOT,MAX_NODES,%u", MAX_NODES);
+        sendAsciiMsg("BOOT,MAX_SLOTS,%u", MAX_SLOTS);
+        sendAsciiMsg("BOOT,SLOT_US,%lu", (unsigned long)SLOT_US);
+        sendAsciiMsg("BOOT,MAX_CHANNELS,%u", MAX_CHANNELS_PER_NODE);
+        sendAsciiMsg("BOOT,SERIAL_FORMAT,BINARY_COBS_ENCODED");
     }
 
     void printStats(uint32_t now_ms) {
-        Serial.println("STATS_BEGIN");
-        Serial.printf("STATS,STATE,%u\n", system_state_);
-        Serial.printf("STATS,ACTIVE_NODES,%u\n", active_count_);
-        Serial.printf("STATS,SLOT_US,%lu\n", (unsigned long)SLOT_US);
-        Serial.printf("STATS,RX_OVERRUN,%lu\n", (unsigned long)rx_overruns_);
-        Serial.printf("STATS,BEACON_TX_ERR,%lu\n", (unsigned long)beacon_errors_);
-        Serial.printf("STATS,TX_ERR,%lu\n", (unsigned long)tx_errors_);
+        sendAsciiMsg("STATS_BEGIN");
+        sendAsciiMsg("STATS,STATE,%u", system_state_);
+        sendAsciiMsg("STATS,ACTIVE_NODES,%u", active_count_);
+        sendAsciiMsg("STATS,SLOT_US,%lu", (unsigned long)SLOT_US);
+        sendAsciiMsg("STATS,RX_OVERRUN,%lu", (unsigned long)rx_overruns_);
+        sendAsciiMsg("STATS,BEACON_TX_ERR,%lu", (unsigned long)beacon_errors_);
+        sendAsciiMsg("STATS,TX_ERR,%lu", (unsigned long)tx_errors_);
 
         for (uint8_t i = 0; i < MAX_NODES; i++) {
             if (!nodes_[i].in_use) continue;
             char mac_text[18] = {};
             formatMac(nodes_[i].mac, mac_text, sizeof(mac_text));
-            Serial.printf("NODE,%u,MAC=%s,CH=0x%02X,RATE=%u,RX=%lu,EMIT=%lu,ACKED=%u,LOST=%lu,INVALID=%lu,AGE_MS=%lu\n",
+            sendAsciiMsg("NODE,%u,MAC=%s,CH=0x%02X,RATE=%u,RX=%lu,EMIT=%lu,ACKED=%u,LOST=%lu,INVALID=%lu,AGE_MS=%lu",
                           nodes_[i].node_id,
                           mac_text,
                           nodes_[i].channel_mask,
@@ -677,7 +674,7 @@ private:
                           (unsigned long)nodes_[i].invalid_packets,
                           (unsigned long)(now_ms - nodes_[i].last_seen_ms));
         }
-        Serial.println("STATS_END");
+        sendAsciiMsg("STATS_END");
     }
 };
 
