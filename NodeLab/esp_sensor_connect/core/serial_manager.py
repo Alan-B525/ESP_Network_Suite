@@ -23,6 +23,8 @@ Flujo de datos:
 import threading
 import queue
 import time
+import json
+import os
 from typing import Optional, Callable
 
 import serial
@@ -91,12 +93,23 @@ class SerialManager:
 
         # ---- Info de nodos (MACs, etc.) ----
         self._node_macs: dict[int, str] = {}
+        self._aliases: dict[str, str] = {}
+        self._aliases_file = "aliases.json"
+        self._load_aliases()
 
         # ---- Ultimo beacon recibido ----
         self.last_beacon: Optional[BeaconFrame] = None
 
         # ---- Ultimo bloque STATS recibido ----
         self.last_stats: Optional[StatsFrame] = None
+
+        # ---- Watchdog y Auto-connect ----
+        self._last_data_time: dict[int, float] = {}
+        self._node_health: dict[int, bool] = {} # True: Healthy, False: Offline
+        self._manager_running = True
+        
+        self._auto_connect_thread = threading.Thread(target=self._auto_connect_loop, daemon=True)
+        self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
 
         # ---- Callbacks para notificaciones a la UI ----
         self._on_status_callback: Optional[Callable] = None
@@ -106,10 +119,41 @@ class SerialManager:
 
         # ---- Parser de protocolo ----
         self._parser = ProtocolParser()
+        
+        # Iniciar hilos background
+        self._auto_connect_thread.start()
+        self._watchdog_thread.start()
 
     # ============================================================
-    # Metodos publicos - Deteccion de puertos
+    # Metodos publicos - Alias y Deteccion de puertos
     # ============================================================
+
+    def _load_aliases(self):
+        if os.path.exists(self._aliases_file):
+            try:
+                with open(self._aliases_file, "r") as f:
+                    self._aliases = json.load(f)
+            except Exception as e:
+                print(f"[SERIAL] Error cargando alias: {e}")
+
+    def save_aliases(self):
+        try:
+            with open(self._aliases_file, "w") as f:
+                json.dump(self._aliases, f, indent=4)
+        except Exception as e:
+            print(f"[SERIAL] Error guardando alias: {e}")
+
+    def set_node_alias(self, mac: str, alias: str):
+        """Asigna un alias persistente a una MAC."""
+        if alias:
+            self._aliases[mac] = alias
+        else:
+            self._aliases.pop(mac, None)
+        self.save_aliases()
+
+    def get_node_alias(self, mac: str) -> str:
+        """Retorna el alias de una MAC, o cadena vacia si no existe."""
+        return self._aliases.get(mac, "")
 
     @staticmethod
     def list_available_ports() -> list[dict]:
@@ -321,9 +365,11 @@ class SerialManager:
             return list(buffer[-count:])
 
     def get_all_node_ids(self) -> list[int]:
-        """Retorna la lista de IDs de nodos que tienen datos en el buffer."""
+        """Retorna la lista de IDs de nodos descubiertos (activos o caídos)."""
         with self._lock:
-            return sorted(self._node_data_buffer.keys())
+            # Usar _node_health garantiza que vemos nodos detectados vía HELLO/JOIN
+            # incluso si aún no han enviado tramas DATA.
+            return sorted(self._node_health.keys())
 
     def get_packet_loss_rate(self, node_id: int) -> float:
         """
@@ -342,6 +388,10 @@ class SerialManager:
     def get_node_mac(self, node_id: int) -> str:
         """Retorna la MAC de un nodo, o cadena vacia si no se conoce."""
         return self._node_macs.get(node_id, "")
+
+    def is_node_healthy(self, node_id: int) -> bool:
+        """Retorna True si el nodo ha reportado datos recientemente, False si esta caido."""
+        return self._node_health.get(node_id, False)
 
     # ============================================================
     # Metodos publicos - Registro de callbacks
@@ -436,6 +486,18 @@ class SerialManager:
 
     def _handle_data_frame(self, frame: DataFrame):
         """Procesa una trama de datos: encola para logger y actualiza buffer UI."""
+        # 0. Actualizar watchdog
+        node_id = frame.node_id
+        self._last_data_time[node_id] = time.time()
+        
+        # Si estaba caído, recuperarlo
+        if not self._node_health.get(node_id, True):
+            self._node_health[node_id] = True
+            print(f"[WATCHDOG] Nodo {node_id} se ha recuperado (recibiendo datos de nuevo)")
+            if self._on_node_event:
+                # Reusamos JoinFrame como senal de que el nodo esta activo de nuevo visualmente
+                self._on_node_event(JoinFrame(node_id=node_id, mac=self._node_macs.get(node_id, "")))
+
         # 1. Enviar a la cola del DataLogger
         try:
             self.data_queue.put_nowait(frame)
@@ -484,6 +546,13 @@ class SerialManager:
                 't0_epoch_ms': frame.t0_epoch_ms,
                 't0_sample_index': frame.t0_sample_index,
             }
+            
+        # Enviar a la cola del DataLogger para que escriba las cabeceras
+        try:
+            self.data_queue.put_nowait(frame)
+        except queue.Full:
+            pass
+
         print(f"[SERIAL] TIMING node={frame.node_id} ch={frame.channel_id} "
               f"rate={frame.sample_rate_hz}Hz dt={frame.dt_us}us")
 
@@ -498,6 +567,9 @@ class SerialManager:
         if frame.mac and frame.mac not in self.active_nodes:
             self.active_nodes.append(frame.mac)
             self.nodes_count = len(self.active_nodes)
+            
+        self._node_health[frame.node_id] = True
+        self._last_data_time[frame.node_id] = time.time()
 
         event_type = "JOIN" if isinstance(frame, JoinFrame) else "HELLO"
         print(f"[SERIAL] {event_type}: Nodo {frame.node_id} - {frame.mac}")
@@ -553,6 +625,47 @@ class SerialManager:
             self._on_ack_callback(frame)
 
     # ============================================================
+    # Tareas en background (Auto-connect & Watchdog)
+    # ============================================================
+
+    def _auto_connect_loop(self):
+        """Intenta conectarse automaticamente a un puerto disponible si estamos desconectados."""
+        while self._manager_running:
+            if not self.is_connected:
+                ports = self.list_available_ports()
+                if ports:
+                    # Intenta conectar al primero de la lista (suele ser el ultimo enchufado en Windows o CH340)
+                    # Idealmente se podria filtrar por 'hwid' (ej: VID:PID de los ESP32 CH340/CP2102)
+                    target_port = ports[-1]['device'] # Usar el mas reciente/alto suele ser util
+                    # Buscamos especificamente algun indicio de CH340 o Silicon Labs
+                    for p in ports:
+                        if 'CH340' in p.get('description', '') or 'Silicon' in p.get('description', '') or 'UART' in p.get('description', ''):
+                            target_port = p['device']
+                            break
+                    print(f"[AUTO-CONNECT] Intentando conexion con {target_port}...")
+                    if self.connect(target_port):
+                        print(f"[AUTO-CONNECT] ¡Conectado automaticamente a {target_port}!")
+            
+            # Chequeo cada 3 segundos si estamos desconectados
+            time.sleep(3.0)
+
+    def _watchdog_loop(self):
+        """Vigila la llegada de datos; si pasan 5 segundos sin datos en un nodo activo, lo marca como caido."""
+        while self._manager_running:
+            if self.is_acquiring:
+                now = time.time()
+                for node_id, last_time in list(self._last_data_time.items()):
+                    # Solo vigilamos nodos que el sistema cree que están sanos
+                    if self._node_health.get(node_id, True):
+                        if now - last_time > 5.0:
+                            print(f"[WATCHDOG] Nodo {node_id} caido! (> 5.0s sin datos)")
+                            self._node_health[node_id] = False
+                            if self._on_node_event:
+                                mac = self._node_macs.get(node_id, "")
+                                self._on_node_event(TimeoutFrame(node_id=node_id, mac=mac))
+            time.sleep(1.0)
+
+    # ============================================================
     # Limpieza
     # ============================================================
 
@@ -561,6 +674,7 @@ class SerialManager:
         Limpieza completa: desconectar y liberar todos los recursos.
         Llamar al cerrar la aplicacion.
         """
+        self._manager_running = False
         self.disconnect()
 
         while not self.data_queue.empty():

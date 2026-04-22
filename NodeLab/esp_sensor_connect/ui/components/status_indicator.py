@@ -15,7 +15,7 @@ import flet as ft
 from ui.design_tokens import (
     FONT_FAMILY, BG_SURFACE_2, BORDER_DEFAULT, RADIUS_MD,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_TERTIARY,
-    STATUS_OK, STATUS_CRITICAL, STATUS_ACQUIRING, STATUS_INACTIVE,
+    STATUS_OK, STATUS_WARNING, STATUS_CRITICAL, STATUS_ACQUIRING, STATUS_INACTIVE,
     SPACE_SM, SPACE_MD, shadow_glow,
 )
 
@@ -120,6 +120,24 @@ class StatusIndicator(ft.Container):
         self._badge.bgcolor = ft.Colors.with_opacity(0.12, STATUS_CRITICAL)
 
         self.border = ft.border.all(1, BORDER_DEFAULT)
+        self._safe_update()
+
+    def set_searching(self):
+        """Muestra estado de búsqueda automática (amarillo)."""
+        self._dot_inner.bgcolor = STATUS_WARNING
+        self._dot_outer.bgcolor = ft.Colors.with_opacity(0.15, STATUS_WARNING)
+        self._dot_outer.shadow = shadow_glow(STATUS_WARNING, 0.3, 10)
+
+        self._label.value = "Buscando Base Station..."
+        self._label.color = STATUS_WARNING
+
+        self._badge.content = ft.Text(
+            "AUTO", size=9, color=STATUS_WARNING,
+            weight=ft.FontWeight.W_700, font_family=FONT_FAMILY,
+        )
+        self._badge.bgcolor = ft.Colors.with_opacity(0.12, STATUS_WARNING)
+
+        self.border = ft.border.all(1, ft.Colors.with_opacity(0.3, STATUS_WARNING))
         self._safe_update()
 
     def set_acquiring(self):

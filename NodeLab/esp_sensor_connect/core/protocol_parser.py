@@ -238,9 +238,9 @@ class ProtocolParser:
         count = int(parts[6])
 
         if encoding == 2:  # FLOAT32
-            values = [float(v) for v in parts[7:]]
+            values = [float(v) for v in parts[7:] if v]
         else:  # INT16
-            values = [float(int(v)) for v in parts[7:]]
+            values = [float(int(v)) for v in parts[7:] if v]
 
         return DataFrame(
             node_id=node_id,

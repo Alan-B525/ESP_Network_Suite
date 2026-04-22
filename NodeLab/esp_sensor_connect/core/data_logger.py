@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from core.protocol_parser import DataFrame
+from core.protocol_parser import DataFrame, TimingFrame
 
 
 class DataLogger:
@@ -71,8 +71,9 @@ class DataLogger:
         self.total_records: int = 0
 
         # Internos para gestión de archivos CSV
-        # {node_id: {'file': file_obj, 'writer': csv_writer, 'count': int}}
-        self._csv_files: dict[int, dict] = {}
+        # csv_key -> {'file': file_obj, 'writer': csv_writer, 'count': int, 'last_written_index': int}
+        self._csv_files: dict[tuple[int, int], dict] = {}
+        self._timing_info: dict[tuple[int, int], TimingFrame] = {}
         self._last_flush_time: float = 0.0
 
     # ============================================================
@@ -177,10 +178,11 @@ class DataLogger:
                     self._periodic_flush()
                     continue
 
-                # Solo procesar DataFrames (ignorar otros tipos si llegan)
+                # Procesar tramas relevantes para el logger
                 if isinstance(frame, DataFrame):
                     self._write_data_frame(frame)
-                    self.total_records += 1
+                elif isinstance(frame, TimingFrame):
+                    self._handle_timing_frame(frame)
 
                 # Flush periódico cada FLUSH_INTERVAL segundos
                 self._periodic_flush()
@@ -204,8 +206,9 @@ class DataLogger:
                 frame = self._data_queue.get_nowait()
                 if isinstance(frame, DataFrame):
                     self._write_data_frame(frame)
-                    self.total_records += 1
                     drained += 1
+                elif isinstance(frame, TimingFrame):
+                    self._handle_timing_frame(frame)
             except queue.Empty:
                 break
 
@@ -216,60 +219,94 @@ class DataLogger:
     # Escritura CSV
     # ============================================================
 
+    def _handle_timing_frame(self, frame: TimingFrame):
+        """Almacena la metadata de tiempo para usarla en los encabezados del CSV."""
+        csv_key = (frame.node_id, frame.channel_id)
+        self._timing_info[csv_key] = frame
+
     def _write_data_frame(self, frame: DataFrame):
         """
-        Escribe un DataFrame en el archivo CSV correspondiente al nodo+canal.
-
-        v4: cada archivo CSV es por nodo_canal para organizar multi-canal.
+        Escribe un DataFrame en el archivo CSV de forma continua.
+        Rellena con NaN los saltos si se detecta pérdida de paquetes.
         """
         csv_key = (frame.node_id, frame.channel_id)
 
         # Crear archivo CSV para este nodo+canal si no existe
         if csv_key not in self._csv_files:
-            self._create_csv_for_node(frame.node_id, frame.channel_id,
-                                      len(frame.values))
+            self._create_csv_for_node(frame.node_id, frame.channel_id)
 
-        # Escribir la fila de datos
         csv_info = self._csv_files[csv_key]
-        row = [
-            frame.timestamp.isoformat(),
-            frame.node_id,
-            frame.channel_id,
-            frame.sequence,
-            frame.first_sample_index,
-        ] + frame.values
+        writer = csv_info['writer']
+        last_idx = csv_info['last_written_index']
+        start_idx = frame.first_sample_index
 
-        csv_info['writer'].writerow(row)
-        csv_info['count'] += 1
+        # Si detectamos un salto (paquete perdido), insertamos NaNs
+        if last_idx != -1 and start_idx > last_idx + 1:
+            gap_size = start_idx - (last_idx + 1)
+            # Para evitar cuelgues por errores gigantes, limitamos el gap
+            if gap_size < 100000:
+                for i in range(gap_size):
+                    writer.writerow([last_idx + 1 + i, 'NaN'])
+                    self.total_records += 1
 
-    def _create_csv_for_node(self, node_id: int, channel_id: int,
-                              num_values: int):
+        # Si recibimos datos solapados o atrasados (duplicados/desorden)
+        if last_idx != -1 and start_idx <= last_idx:
+            skip_count = last_idx - start_idx + 1
+            if skip_count >= len(frame.values):
+                return  # Paquete totalmente redundante, lo ignoramos
+            values_to_write = frame.values[skip_count:]
+            curr_idx = last_idx + 1
+        else:
+            values_to_write = frame.values
+            curr_idx = start_idx
+
+        # Escribimos las muestras verticalmente
+        for val in values_to_write:
+            writer.writerow([curr_idx, val])
+            curr_idx += 1
+            self.total_records += 1
+
+        csv_info['count'] += len(values_to_write)
+        csv_info['last_written_index'] = curr_idx - 1
+
+    def _create_csv_for_node(self, node_id: int, channel_id: int):
         """
-        Crea el archivo CSV y su writer para un nodo+canal específico.
-
-        v4: archivos nombrados node_{id}_ch{ch}.csv
+        Crea el archivo CSV continuo para un nodo+canal específico,
+        escribiendo la cabecera t0 y dt si está disponible.
         """
         if not self.session_path:
             return
 
         filepath = self.session_path / f"node_{node_id}_ch{channel_id}.csv"
 
-        # Abrir archivo en modo append con buffering de línea
+        # Abrir archivo en modo write
         file_obj = open(filepath, 'w', newline='', encoding='utf-8')
-        writer = csv.writer(file_obj)
-
-        # Escribir encabezado v4
-        header = ['timestamp', 'node_id', 'channel_id', 'sequence',
-                  'first_sample_index']
-        header += [f'value_{i}' for i in range(num_values)]
-        writer.writerow(header)
-
+        
         csv_key = (node_id, channel_id)
+        # El nodo suele enviar channel_id = 255 (0xFF) para indicar que el timing aplica a todos los canales
+        timing = self._timing_info.get(csv_key) or self._timing_info.get((node_id, 255))
+
+        # Escribir metadatos como comentarios
+        if timing:
+            file_obj.write(f"# t0_epoch_ms = {timing.t0_epoch_ms}\n")
+            file_obj.write(f"# t0_sample_index = {timing.t0_sample_index}\n")
+            file_obj.write(f"# dt_us = {timing.dt_us}\n")
+            file_obj.write(f"# sample_rate_hz = {timing.sample_rate_hz}\n")
+        else:
+            file_obj.write("# t0_epoch_ms = unknown\n")
+            file_obj.write("# t0_sample_index = unknown\n")
+            file_obj.write("# dt_us = unknown\n")
+            file_obj.write("# sample_rate_hz = unknown\n")
+
+        writer = csv.writer(file_obj)
+        writer.writerow(['sample_index', 'value'])
+
         self._csv_files[csv_key] = {
             'file': file_obj,
             'writer': writer,
             'count': 0,
             'path': filepath,
+            'last_written_index': -1,
         }
 
         print(f"[LOGGER] Archivo CSV creado: {filepath}")

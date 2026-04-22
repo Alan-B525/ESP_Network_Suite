@@ -7,6 +7,8 @@ parametros TDMA, y terminal de comandos estilizada.
 """
 
 import datetime
+import json
+import os
 import flet as ft
 
 from core.serial_manager import SerialManager
@@ -34,7 +36,13 @@ class ConfigView(ft.Column):
         self._page = page
         self._selected_port = ""
         self._selected_baudrate = str(SerialManager.DEFAULT_BAUDRATE)
+        self._tdma_freq = "100"
+        self._tdma_slot = "10"
+        self._tdma_max_nodes = "10"
         self._log_lines: list[str] = ["[ Sistema listo ]"]
+        self._config_file = "app_config.json"
+        
+        self._load_config()
 
         # ============================================================
         # SECCION 1: Conexion Serie
@@ -106,15 +114,15 @@ class ConfigView(ft.Column):
         # ============================================================
 
         self._freq_input = input_field(
-            label="Frecuencia TDMA (Hz)", value="100", width=200,
+            label="Frecuencia TDMA (Hz)", value=self._tdma_freq, width=200,
             icon=ft.Icons.SPEED_ROUNDED,
         )
         self._slot_input = input_field(
-            label="Duracion Slot (ms)", value="10", width=200,
+            label="Duracion Slot (ms)", value=self._tdma_slot, width=200,
             icon=ft.Icons.TIMER_ROUNDED,
         )
         self._max_nodes_input = input_field(
-            label="Max. Nodos", value="10", width=200,
+            label="Max. Nodos", value=self._tdma_max_nodes, width=200,
             icon=ft.Icons.DEVICE_HUB_ROUNDED,
         )
 
@@ -136,6 +144,53 @@ class ConfigView(ft.Column):
                     self._apply_tdma_btn,
                 ],
                 spacing=SPACE_LG,
+            ),
+        )
+
+        # ============================================================
+        # SECCION 2.5: Identificacion de Nodos
+        # ============================================================
+
+        self._alias_mac_dropdown = styled_dropdown(
+            label="Seleccionar Nodo (MAC)",
+            options=[],
+            on_select=self._on_alias_node_selected,
+            width=280,
+        )
+
+        self._refresh_alias_btn = ghost_button(
+            icon=ft.Icons.REFRESH_ROUNDED,
+            tooltip="Actualizar lista de nodos",
+            on_click=self._on_refresh_alias_nodes,
+        )
+
+        self._alias_input = input_field(
+            label="Alias del Nodo", value="", width=200,
+            icon=ft.Icons.BADGE_ROUNDED,
+        )
+
+        self._save_alias_btn = primary_button(
+            "Guardar Alias", icon=ft.Icons.SAVE_ROUNDED,
+            on_click=self._on_save_alias, color=ACCENT_PRIMARY,
+        )
+
+        alias_section = section_card(
+            accent_color=ACCENT_PRIMARY,
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            self._alias_mac_dropdown,
+                            self._refresh_alias_btn,
+                            ft.Container(width=SPACE_SM),
+                            self._alias_input,
+                            self._save_alias_btn,
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.END,
+                        wrap=True,
+                    ),
+                ],
+                spacing=SPACE_MD,
             ),
         )
 
@@ -231,12 +286,15 @@ class ConfigView(ft.Column):
         # Section labels
         lbl_conn = self._section_label("CONEXION SERIE")
         lbl_tdma = self._section_label("PARAMETROS TDMA")
+        lbl_alias = self._section_label("IDENTIFICACION DE NODOS")
         lbl_term = self._section_label("TERMINAL DE COMANDOS")
 
         self.controls = [
             lbl_conn, connection_section,
             ft.Container(height=SPACE_SM),
             lbl_tdma, tdma_section,
+            ft.Container(height=SPACE_SM),
+            lbl_alias, alias_section,
             ft.Container(height=SPACE_SM),
             lbl_term, terminal_section,
         ]
@@ -294,10 +352,12 @@ class ConfigView(ft.Column):
 
     def _on_port_selected(self, e):
         self._selected_port = e.control.value
+        self._save_config()
         self._log(f"Puerto seleccionado: {self._selected_port}")
 
     def _on_baudrate_selected(self, e):
         self._selected_baudrate = e.control.value
+        self._save_config()
         self._log(f"Baudrate: {self._selected_baudrate}")
 
     def _on_connect(self, e):
@@ -358,7 +418,48 @@ class ConfigView(ft.Column):
             s = "OK" if ok else "FAIL"
             self._log(f"{s} > {cmd}")
 
+        self._save_config()
         self._show_snackbar("Configuracion TDMA enviada", STATUS_OK)
+
+    # ============================================================
+    # Handlers - Identificacion
+    # ============================================================
+
+    def _on_refresh_alias_nodes(self, e):
+        node_ids = self._serial_manager.get_all_node_ids()
+        options = []
+        for nid in node_ids:
+            mac = self._serial_manager.get_node_mac(nid)
+            if mac:
+                alias = self._serial_manager.get_node_alias(mac)
+                label = f"NODO {nid} - {mac}" + (f" ({alias})" if alias else "")
+                options.append(ft.dropdown.Option(mac, label))
+        
+        self._alias_mac_dropdown.options = options
+        try:
+            self._alias_mac_dropdown.update()
+        except Exception:
+            pass
+
+    def _on_alias_node_selected(self, e):
+        mac = e.control.value
+        alias = self._serial_manager.get_node_alias(mac)
+        self._alias_input.value = alias
+        try:
+            self._alias_input.update()
+        except Exception:
+            pass
+
+    def _on_save_alias(self, e):
+        mac = self._alias_mac_dropdown.value
+        if not mac:
+            self._show_snackbar("Selecciona un nodo primero", STATUS_WARNING)
+            return
+        
+        alias = self._alias_input.value.strip()
+        self._serial_manager.set_node_alias(mac, alias)
+        self._show_snackbar("Alias guardado correctamente", STATUS_OK)
+        self._on_refresh_alias_nodes(None)
 
     # ============================================================
     # Handlers - Terminal
@@ -408,3 +509,30 @@ class ConfigView(ft.Column):
             self._disconnect_btn.update()
         except Exception:
             pass
+
+    def _load_config(self):
+        if os.path.exists(self._config_file):
+            try:
+                with open(self._config_file, "r") as f:
+                    cfg = json.load(f)
+                    self._selected_port = cfg.get("port", "")
+                    self._selected_baudrate = cfg.get("baudrate", str(SerialManager.DEFAULT_BAUDRATE))
+                    self._tdma_freq = cfg.get("tdma_freq", "100")
+                    self._tdma_slot = cfg.get("tdma_slot", "10")
+                    self._tdma_max_nodes = cfg.get("tdma_max_nodes", "10")
+            except Exception as e:
+                print(f"[CONFIG] Error cargando config: {e}")
+
+    def _save_config(self):
+        cfg = {
+            "port": self._selected_port,
+            "baudrate": self._selected_baudrate,
+            "tdma_freq": self._freq_input.value,
+            "tdma_slot": self._slot_input.value,
+            "tdma_max_nodes": self._max_nodes_input.value
+        }
+        try:
+            with open(self._config_file, "w") as f:
+                json.dump(cfg, f, indent=4)
+        except Exception as e:
+            print(f"[CONFIG] Error guardando config: {e}")

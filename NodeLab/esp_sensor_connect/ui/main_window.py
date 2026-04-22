@@ -62,6 +62,7 @@ class MainWindow:
 
         # ---- Header components ----
         self._status_indicator = StatusIndicator()
+        self._status_indicator.set_searching()
 
         self._timer_text = ft.Text(
             "00:00:00", size=16, color=TEXT_TERTIARY,
@@ -405,7 +406,7 @@ class MainWindow:
         self._timer_task = self._page.run_task(self._timer_loop)
 
         # Update button to STOP state
-        self._start_btn.content = "STOP"
+        self._start_btn.text = "STOP"
         self._start_btn.icon = ft.Icons.STOP_ROUNDED
         self._start_btn.bgcolor = STATUS_CRITICAL
         self._start_btn.color = "#FFFFFF"
@@ -428,7 +429,7 @@ class MainWindow:
         self._serial_manager.stop_acquisition()
         self._data_logger.stop_session()
 
-        self._start_btn.content = "START"
+        self._start_btn.text = "START"
         self._start_btn.icon = ft.Icons.PLAY_ARROW_ROUNDED
         self._start_btn.bgcolor = STATUS_OK
         self._start_btn.color = BG_DEEPEST
@@ -473,7 +474,7 @@ class MainWindow:
             self._status_indicator.set_connected(
                 self._serial_manager.current_port)
         else:
-            self._status_indicator.set_disconnected()
+            self._status_indicator.set_searching()
             if self._serial_manager.is_acquiring:
                 self._stop_acquisition()
         self._config_view.update_connection_state(connected)

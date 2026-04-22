@@ -7,6 +7,7 @@ de un nodo inalambrico: estado, metricas, sparkline, y alertas
 visuales basadas en la calidad del enlace.
 """
 
+import random
 import flet as ft
 import flet.canvas as cv
 
@@ -113,6 +114,19 @@ class NodeCard(ft.Card):
             font_family=FONT_MONO, weight=ft.FontWeight.W_500,
         )
 
+        # Telemetria simulada
+        self._battery_text = ft.Text(
+            "100%", size=9, color=STATUS_OK,
+            font_family=FONT_MONO, weight=ft.FontWeight.W_500,
+        )
+        self._rssi_text = ft.Text(
+            "-60 dBm", size=9, color=STATUS_OK,
+            font_family=FONT_MONO, weight=ft.FontWeight.W_500,
+        )
+        
+        self._battery_level = 100.0 - (node_id * 2) # Diferente para cada nodo
+        self._rssi_base = -60 - (node_id * 3)
+
         # Barra de perdida
         self._loss_bar = ft.ProgressBar(
             value=0, bar_height=3,
@@ -217,10 +231,22 @@ class NodeCard(ft.Card):
             padding=ft.Padding(SPACE_MD, SPACE_MD, SPACE_SM, SPACE_MD),
         )
 
+        # Telemetry row
+        telemetry = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Row(controls=[ft.Icon(ft.Icons.BATTERY_STD_ROUNDED, size=12, color=TEXT_TERTIARY), self._battery_text], spacing=2),
+                    ft.Row(controls=[ft.Icon(ft.Icons.SIGNAL_CELLULAR_ALT_ROUNDED, size=12, color=TEXT_TERTIARY), self._rssi_text], spacing=2),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            ),
+            padding=ft.Padding(SPACE_MD, 0, SPACE_MD, 0),
+        )
+
         # Tarjeta completa
         self.content = ft.Container(
             content=ft.Column(
-                controls=[header, value_section, metrics,
+                controls=[header, value_section, metrics, telemetry,
                           sparkline_section, loss_section],
                 spacing=0,
             ),
@@ -257,6 +283,27 @@ class NodeCard(ft.Card):
         # Metricas
         self._seq_text.value = f"SEQ {sequence}"
         self._packets_text.value = f"{packets:,} pkt"
+
+        # Simular Bateria y RSSI
+        self._battery_level = max(0, self._battery_level - random.uniform(0.001, 0.005))
+        current_rssi = self._rssi_base + random.uniform(-3, 3)
+        
+        self._battery_text.value = f"{int(self._battery_level)}%"
+        self._rssi_text.value = f"{int(current_rssi)} dBm"
+        
+        if self._battery_level < 20:
+            self._battery_text.color = STATUS_CRITICAL
+        elif self._battery_level < 50:
+            self._battery_text.color = STATUS_WARNING
+        else:
+            self._battery_text.color = STATUS_OK
+            
+        if current_rssi < -85:
+            self._rssi_text.color = STATUS_CRITICAL
+        elif current_rssi < -75:
+            self._rssi_text.color = STATUS_WARNING
+        else:
+            self._rssi_text.color = STATUS_OK
 
         # Perdida de paquetes con coloreo semantico
         self._loss_bar.value = min(loss_rate / 100.0, 1.0)
@@ -320,22 +367,42 @@ class NodeCard(ft.Card):
 
         self._sparkline.shapes = shapes
 
-    def set_active(self, active: bool = True):
-        """Marca el nodo como activo o inactivo visualmente."""
-        if active:
+    def set_health(self, healthy: bool):
+        """Marca el nodo como activo (LIVE) o inactivo (OFFLINE) visualmente."""
+        if healthy:
             self._status_dot.bgcolor = STATUS_OK
             self._status_dot.shadow = shadow_glow(STATUS_OK, 0.5, 6)
             self._live_badge.visible = True
+            self._live_badge.content.value = "LIVE"
+            self._live_badge.content.color = STATUS_ACQUIRING
+            self._live_badge.bgcolor = ft.Colors.with_opacity(0.12, STATUS_ACQUIRING)
+            self.content.border = ft.border.all(1, ft.Colors.with_opacity(0.2, self._color))
+            self._id_text.color = self._color
+            self._value_number.color = TEXT_PRIMARY
         else:
-            self._status_dot.bgcolor = TEXT_TERTIARY
-            self._status_dot.shadow = None
-            self._live_badge.visible = False
+            self._status_dot.bgcolor = STATUS_CRITICAL
+            self._status_dot.shadow = shadow_glow(STATUS_CRITICAL, 0.8, 12)
+            self._live_badge.visible = True
+            self._live_badge.content.value = "OFFLINE"
+            self._live_badge.content.color = STATUS_CRITICAL
+            self._live_badge.bgcolor = ft.Colors.with_opacity(0.12, STATUS_CRITICAL)
+            self.content.border = ft.border.all(1, ft.Colors.with_opacity(0.3, STATUS_CRITICAL))
+            self._id_text.color = TEXT_TERTIARY
+            self._value_number.color = TEXT_TERTIARY
         self._safe_update()
 
     def set_mac(self, mac: str):
         """Actualiza la direccion MAC mostrada."""
         self.mac_address = mac
         self._mac_text.value = mac
+        self._safe_update()
+
+    def set_alias(self, alias: str):
+        """Actualiza el alias mostrado (titulos principales)."""
+        if alias:
+            self._id_text.value = alias.upper()
+        else:
+            self._id_text.value = f"NODO {self.node_id:02d}"
         self._safe_update()
 
     def _safe_update(self):

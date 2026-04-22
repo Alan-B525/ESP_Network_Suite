@@ -67,6 +67,7 @@ struct ActiveNodeEntry {
 class TDMAGateway {
 public:
     void begin() {
+        Serial.setTxBufferSize(8192); // Buffer grande para rafagas de 4 canales
         Serial.begin(SERIAL_BAUD);
         delay(120);
 
@@ -377,9 +378,10 @@ private:
                 node->highest_seq_acked = header.sequence_id;
                 should_emit = true;
             } else if (delta > 0) {
-                node->lost_packets += delta;
-                node->highest_seq_acked = header.sequence_id;
-                should_emit = true;
+                // ARQ Go-Back-N: Descartar el paquete desordenado
+                // NO avanzamos highest_seq_acked para forzar la retransmisión
+                node->lost_packets += delta; // Solo para estadísticas de red
+                should_emit = false;
                 Serial.printf("LOSS,%u,EXPECTED=%u,GOT=%u\n",
                               node->node_id, expected_next, header.sequence_id);
             }

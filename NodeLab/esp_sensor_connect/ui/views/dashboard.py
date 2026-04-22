@@ -248,7 +248,14 @@ class DashboardView(ft.Column):
             avg = sum(self._serial_manager.get_packet_loss_rate(n)
                       for n in node_ids) / len(node_ids)
             self._kpi_loss.value = f"{avg:.1f}%"
-            if avg < 1:
+            
+            # Check for any dead nodes to show critical
+            any_dead = any(not self._serial_manager.is_node_healthy(n) for n in node_ids)
+            
+            if any_dead:
+                self._kpi_loss.color = STATUS_CRITICAL
+                self._kpi_loss.value = "NODO CAIDO"
+            elif avg < 1:
                 self._kpi_loss.color = STATUS_OK
             elif avg < 5:
                 self._kpi_loss.color = STATUS_WARNING
@@ -278,13 +285,10 @@ class DashboardView(ft.Column):
         node_ids = self._serial_manager.get_all_node_ids()
 
         if not node_ids:
-            self._no_data_overlay.visible = True
-            self._safe_update(self._no_data_overlay)
+            if not self._no_data_overlay.visible:
+                self._no_data_overlay.visible = True
+                self._safe_update(self._no_data_overlay)
             return
-
-        if self._no_data_overlay.visible:
-            self._no_data_overlay.visible = False
-            self._safe_update(self._no_data_overlay)
 
         # Recopilar datos
         all_node_data = {}
@@ -293,20 +297,44 @@ class DashboardView(ft.Column):
             pts = self._serial_manager.get_node_data(nid, self.MAX_CHART_POINTS)
             if not pts:
                 continue
-            vals = [p.values[self._value_index]
-                    for p in pts if self._value_index < len(p.values)]
+            # Filtrar por el canal seleccionado
+            channel_pts = [p for p in pts if p.channel_id == self._value_index]
+            
+            vals = []
+            for p in channel_pts:
+                vals.extend(p.values)
+                
+            if len(vals) > self.MAX_CHART_POINTS:
+                vals = vals[-self.MAX_CHART_POINTS:]
+
             if vals:
                 all_node_data[nid] = vals
                 all_flat.extend(vals)
 
         if not all_flat:
+            if not self._no_data_overlay.visible:
+                self._no_data_overlay.visible = True
+                self._safe_update(self._no_data_overlay)
             return
 
-        # Rangos
+        # Ocultar overlay si tenemos datos
+        if self._no_data_overlay.visible:
+            self._no_data_overlay.visible = False
+            self._safe_update(self._no_data_overlay)
+
+        # Rangos - auto-escalado estable
         y_min = min(all_flat)
         y_max = max(all_flat)
         rng = y_max - y_min
-        margin = max(rng * 0.15, 1.0)
+        
+        # Rango mínimo para que no salte locamente con ruido
+        if rng < 50.0:
+            mid = (y_max + y_min) / 2.0
+            y_min = mid - 25.0
+            y_max = mid + 25.0
+            rng = 50.0
+            
+        margin = rng * 0.15
         self._y_min = y_min - margin
         self._y_max = y_max + margin
 
@@ -352,6 +380,10 @@ class DashboardView(ft.Column):
         legend_items = []
         for nid, vals in all_node_data.items():
             color = NODE_PALETTE[nid % len(NODE_PALETTE)]
+            # Si el nodo está caído, hacerlo semi-transparente
+            if not self._serial_manager.is_node_healthy(nid):
+                color = ft.Colors.with_opacity(0.3, color)
+
             n = len(vals)
             if n < 2:
                 continue
@@ -367,6 +399,14 @@ class DashboardView(ft.Column):
                 else:
                     path_els.append(cv.Path.LineTo(px, py))
 
+            # Sombra exterior sutil para efecto glow
+            shapes.append(cv.Path(
+                path_els,
+                paint=ft.Paint(color=ft.Colors.with_opacity(0.3, color), stroke_width=6,
+                               style=ft.PaintingStyle.STROKE,
+                               anti_alias=True),
+            ))
+            # Linea principal
             shapes.append(cv.Path(
                 path_els,
                 paint=ft.Paint(color=color, stroke_width=2.5,

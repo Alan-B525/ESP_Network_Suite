@@ -28,31 +28,31 @@ FONT_MONO_URL = "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/maste
 # SUPERFICIES (de mas oscura a mas clara)
 # ================================================================
 
-BG_DEEPEST = "#06090E"        # Fondo de la ventana
-BG_SIDEBAR = "#0B0F15"        # Sidebar / areas de navegacion
-BG_SURFACE_0 = "#0E1319"      # Contenedor de primer nivel (panel principal)
-BG_SURFACE_1 = "#141B22"      # Tarjetas, secciones
-BG_SURFACE_2 = "#1A222B"      # Campos de input, inner cards
-BG_SURFACE_3 = "#212B36"      # Hover states
+BG_DEEPEST = "#020617"        # Fondo de la ventana (Slate 950)
+BG_SIDEBAR = "#080F1D"        # Sidebar / areas de navegacion
+BG_SURFACE_0 = "#0F172A"      # Contenedor de primer nivel (Slate 900)
+BG_SURFACE_1 = "#1E293B"      # Tarjetas, secciones (Slate 800)
+BG_SURFACE_2 = "#334155"      # Campos de input, inner cards (Slate 700)
+BG_SURFACE_3 = "#475569"      # Hover states
 
 # ================================================================
 # BORDES
 # ================================================================
 
-BORDER_SUBTLE = "#1C2530"      # Bordes muy sutiles entre paneles
-BORDER_DEFAULT = "#253040"     # Bordes de tarjetas
-BORDER_STRONG = "#2E3D4F"     # Bordes de inputs, botones
-BORDER_FOCUS = "#00B8D4"      # Borde al enfocar un input
+BORDER_SUBTLE = "#1E293B"      # Bordes muy sutiles entre paneles
+BORDER_DEFAULT = "#334155"     # Bordes de tarjetas
+BORDER_STRONG = "#475569"     # Bordes de inputs, botones
+BORDER_FOCUS = "#0EA5E9"      # Borde al enfocar un input
 
 
 # ================================================================
 # TEXTOS
 # ================================================================
 
-TEXT_PRIMARY = "#E8ECF1"       # Titulos, valores principales
-TEXT_SECONDARY = "#94A3B8"     # Labels, descripciones
-TEXT_TERTIARY = "#5A6A7A"      # Placeholders, metadata menor
-TEXT_DISABLED = "#3A4550"      # Texto deshabilitado
+TEXT_PRIMARY = "#F8FAFC"       # Titulos, valores principales (Slate 50)
+TEXT_SECONDARY = "#94A3B8"     # Labels, descripciones (Slate 400)
+TEXT_TERTIARY = "#64748B"      # Placeholders, metadata menor (Slate 500)
+TEXT_DISABLED = "#475569"      # Texto deshabilitado
 
 
 # ================================================================
@@ -60,19 +60,19 @@ TEXT_DISABLED = "#3A4550"      # Texto deshabilitado
 # ================================================================
 
 # Acento principal de la marca
-ACCENT_PRIMARY = "#00B8D4"     # Cyan — accion principal
-ACCENT_PRIMARY_DIM = "#006B7D" # Cyan apagado — fondos de acento
-ACCENT_SECONDARY = "#7C4DFF"   # Violeta — acento complementario
+ACCENT_PRIMARY = "#0EA5E9"     # Sky Blue — accion principal
+ACCENT_PRIMARY_DIM = "#0284C7" # Sky Blue apagado — fondos de acento
+ACCENT_SECONDARY = "#8B5CF6"   # Violeta — acento complementario
 
 # Estados operacionales
-STATUS_OK = "#00C853"          # Verde — normal, conectado, ok
-STATUS_OK_DIM = "#004D21"      # Verde apagado — fondos
-STATUS_WARNING = "#FFB300"     # Ambar — atencion, aceptable
-STATUS_WARNING_DIM = "#5C4100" # Ambar apagado
-STATUS_CRITICAL = "#FF3D00"    # Rojo — error, critico
-STATUS_CRITICAL_DIM = "#5C1600"  # Rojo apagado
-STATUS_ACQUIRING = "#00E5FF"   # Cyan brillante — adquiriendo datos
-STATUS_INACTIVE = "#546E7A"    # Gris — inactivo
+STATUS_OK = "#10B981"          # Emerald — normal, conectado, ok
+STATUS_OK_DIM = "#065F46"      # Emerald apagado
+STATUS_WARNING = "#F59E0B"     # Amber — atencion, aceptable
+STATUS_WARNING_DIM = "#92400E" # Amber apagado
+STATUS_CRITICAL = "#EF4444"    # Red — error, critico
+STATUS_CRITICAL_DIM = "#7F1D1D"  # Red apagado
+STATUS_ACQUIRING = "#06B6D4"   # Cyan brillante — adquiriendo datos
+STATUS_INACTIVE = "#64748B"    # Gris — inactivo
 
 # Colores por nodo (10 nodos, paleta optimizada para fondo oscuro)
 NODE_PALETTE = [
@@ -414,9 +414,9 @@ def primary_button(
     on_click=None,
     color: str = ACCENT_PRIMARY,
     text_color: str = BG_DEEPEST,
-) -> ft.Button:
+) -> ft.ElevatedButton:
     """Crea un boton primario estilizado."""
-    return ft.Button(
+    return ft.ElevatedButton(
         label,
         icon=icon,
         on_click=on_click,
@@ -436,7 +436,7 @@ def primary_button(
     )
 
 
-def danger_button(label: str, icon: str = None, on_click=None) -> ft.Button:
+def danger_button(label: str, icon: str = None, on_click=None) -> ft.ElevatedButton:
     """Crea un boton de accion destructiva/stop."""
     return primary_button(label, icon, on_click,
                           color=STATUS_CRITICAL, text_color="#FFFFFF")

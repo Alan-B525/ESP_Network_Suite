@@ -195,14 +195,27 @@ class NodesView(ft.Column):
         active_count = 0
         total_loss = 0.0
         for nid, card in self._node_cards.items():
-            data = self._serial_manager.get_node_data(nid, 1)
+            is_healthy = self._serial_manager.is_node_healthy(nid)
+            card.set_health(is_healthy)
+            
+            # Actualizar MAC y Alias
+            mac = self._serial_manager.get_node_mac(nid)
+            if mac:
+                card.set_mac(mac)
+                alias = self._serial_manager.get_node_alias(mac)
+                card.set_alias(alias)
+            
+            data = self._serial_manager.get_node_data(nid, 10)
             if data:
-                latest = data[-1]
+                # Find latest packet for CH0 (primary)
+                latest = next((p for p in reversed(data) if p.channel_id == 0), data[-1])
                 pkts = self._serial_manager.packets_received.get(nid, 0)
                 loss = self._serial_manager.get_packet_loss_rate(nid)
                 card.update_data(latest.values, latest.sequence, pkts, loss)
+                
+            if is_healthy:
                 active_count += 1
-                total_loss += loss
+                total_loss += self._serial_manager.get_packet_loss_rate(nid)
 
         # Actualizar summary chips
         self._chip_active._val.value = str(active_count)

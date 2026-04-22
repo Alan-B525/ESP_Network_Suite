@@ -49,6 +49,7 @@ struct InflightEntry {
     uint8_t  channel_id;
     uint32_t first_idx;
     uint16_t count;
+    uint32_t tx_time_ms;
 };
 
 // ============================================================
@@ -130,13 +131,51 @@ static uint64_t getCurrentEpochMs() {
 }
 
 static int16_t generateSample(uint8_t ch) {
-    uint16_t step = 3 + ch * 2;
+    uint16_t step = 2 + ch; // Diferente frecuencia por canal
     sine_phase[ch] = (sine_phase[ch] + step) & 0xFF;
-    int32_t sine_v = (int32_t)sine_lut[sine_phase[ch]] * 1200 / 32767;
-    int32_t noise = (int32_t)(xorshift32() % 101U) - 50;
-    int32_t val = 2048 + sine_v + noise + ch * 200;
+    
+    int32_t val = 2048;
+    int32_t amplitude = 1500; // Rango de ADC de 12 bits (0-4095)
+    
+    switch (ch) {
+        case 0: {
+            // Canal 0: Onda Senoidal
+            int32_t sine_v = (int32_t)sine_lut[sine_phase[ch]] * amplitude / 32767;
+            val = 2048 + sine_v;
+            break;
+        }
+        case 1: {
+            // Canal 1: Onda Cuadrada
+            val = (sine_phase[ch] < 128) ? (2048 + amplitude) : (2048 - amplitude);
+            break;
+        }
+        case 2: {
+            // Canal 2: Onda Triangular
+            if (sine_phase[ch] < 128) {
+                val = 2048 - amplitude + (amplitude * 2 * sine_phase[ch] / 127);
+            } else {
+                val = 2048 + amplitude - (amplitude * 2 * (sine_phase[ch] - 128) / 127);
+            }
+            break;
+        }
+        case 3: {
+            // Canal 3: Onda Diente de Sierra (Sawtooth)
+            val = 2048 - amplitude + (amplitude * 2 * sine_phase[ch] / 255);
+            break;
+        }
+        default:
+            val = 2048;
+            break;
+    }
+    
+    // Añadimos un ruido ligero (opcional, para simular señales reales)
+    int32_t noise = (int32_t)(xorshift32() % 21U) - 10;
+    val += noise;
+    
+    // Clamping para asegurar que se mantiene en el rango de un ADC de 12 bits
     if (val < 0) val = 0;
     if (val > 4095) val = 4095;
+    
     return (int16_t)val;
 }
 
@@ -153,7 +192,7 @@ static bool inflightFull() {
 }
 
 static void inflightRecord(uint16_t seq, uint8_t ch, uint32_t first_idx, uint16_t count) {
-    inflight_ring[inflight_head] = {seq, ch, first_idx, count};
+    inflight_ring[inflight_head] = {seq, ch, first_idx, count, millis()};
     inflight_head = (inflight_head + 1) % INFLIGHT_CAPACITY;
 }
 
@@ -341,7 +380,25 @@ static void transmitBurstInSlot() {
         sendTimingInfo();
     }
 
-    // 2. Burst: send data for each channel round-robin
+    // 2. ARQ Timeout & Rewind Check
+    if (inflightCount() > 0) {
+        InflightEntry &oldest = inflight_ring[inflight_tail];
+        // Timeout dinámico: ~2 ciclos TDMA (mínimo 200ms)
+        uint32_t timeout_ms = (tdma_cycle_us > 0) ? (tdma_cycle_us / 500) : 2000;
+        if (timeout_ms < 200) timeout_ms = 200;
+
+        if ((millis() - oldest.tx_time_ms) > timeout_ms) {
+            // Timeout! Rebobinar los punteros para retransmitir
+            next_seq = oldest.seq_id;
+            for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
+                sent[ch] = acked[ch];
+            }
+            inflightReset();
+            Serial.printf("NODE: ARQ Rewind! Timeout on seq=%u\n", oldest.seq_id);
+        }
+    }
+
+    // 3. Burst: send data for each channel round-robin
     uint8_t pkts_sent = 0;
     for (uint8_t round = 0; round < BURST_MAX_PKTS_PER_SLOT; round++) {
         if (pkts_sent >= BURST_MAX_PKTS_PER_SLOT || inflightFull()) break;
@@ -546,7 +603,9 @@ void loop() {
             static uint32_t last_hello_cycle = UINT32_MAX;
             uint32_t cycle_idx = elapsed / cycle_us;
             if (cycle_idx != last_hello_cycle) {
-                sendNodeHello();
+                if (local_state != STATE_ACQUIRING) {
+                    sendNodeHello();
+                }
                 last_hello_cycle = cycle_idx;
             }
         }
