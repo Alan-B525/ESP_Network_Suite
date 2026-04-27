@@ -17,6 +17,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <tdma_protocol.h>
+#include <esp_timer.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -132,12 +133,14 @@ private:
     uint8_t system_state_ = STATE_DISCOVERY;
     uint16_t target_rate_hz_ = 1000;     // Default sample rate
     uint64_t rtc_epoch_ms_ = 0;
-    uint32_t rtc_set_at_us_ = 0;
+    // ---- RTC con timer de 64 bits para evitar wrap de micros() ----
+    uint64_t rtc_set_at_us_64_ = 0;
 
     uint64_t getCurrentEpochMs() {
         if (rtc_epoch_ms_ == 0) return 0;
-        uint32_t elapsed_us = micros() - rtc_set_at_us_;
-        return rtc_epoch_ms_ + (elapsed_us / 1000UL);
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        uint64_t elapsed_us = now_us - rtc_set_at_us_64_;
+        return rtc_epoch_ms_ + (elapsed_us / 1000ULL);
     }
 
     // ---- Nodos y schedule ----
@@ -217,13 +220,19 @@ private:
     void processCommand(const char *cmd) {
         if (strcmp(cmd, "CMD_START") == 0) {
             system_state_ = STATE_ACQUIRING;
+            for (uint8_t i = 0; i < MAX_NODES; i++) {
+                if (nodes_[i].in_use) {
+                    nodes_[i].highest_seq_acked = 0;
+                    nodes_[i].highest_seq_received = 0;
+                }
+            }
             sendAsciiMsg("ACK,CMD_START,OK");
         } else if (strcmp(cmd, "CMD_STOP") == 0) {
             system_state_ = STATE_IDLE;
             sendAsciiMsg("ACK,CMD_STOP,OK");
         } else if (strncmp(cmd, "CMD_SET_TIME,", 13) == 0) {
             rtc_epoch_ms_ = strtoull(cmd + 13, nullptr, 10);
-            rtc_set_at_us_ = micros();
+            rtc_set_at_us_64_ = (uint64_t)esp_timer_get_time();
             sendAsciiMsg("ACK,CMD_SET_TIME,OK");
         } else if (strncmp(cmd, "CMD_SET_RATE,", 13) == 0) {
             uint16_t rate = (uint16_t)atoi(cmd + 13);
@@ -336,6 +345,7 @@ private:
                 case PKT_NODE_HELLO:  handleNodeHello(frame);  break;
                 case PKT_DATA:        handleDataPacket(frame); break;
                 case PKT_TIMING_INFO: handleTimingInfo(frame); break;
+                case PKT_NODE_TELEMETRY: handleNodeTelemetry(frame); break;
                 default: break;
             }
         }
@@ -350,10 +360,42 @@ private:
 
         NodeHelloPacket hello = {};
         memcpy(&hello, frame.payload, sizeof(hello));
-        if (hello.version != PROTOCOL_VERSION || !isValidNodeId(hello.node_id)) return;
+        if (hello.version != PROTOCOL_VERSION) return;
 
-        ActiveNodeEntry *node = findOrCreateNode(frame.mac, hello.node_id);
+        uint8_t target_node_id = hello.node_id;
+        if (target_node_id == 0) {
+            ActiveNodeEntry *existing = nullptr;
+            for (uint8_t i = 0; i < MAX_NODES; i++) {
+                if (nodes_[i].in_use && memcmp(nodes_[i].mac, frame.mac, 6) == 0) {
+                    existing = &nodes_[i];
+                    break;
+                }
+            }
+            if (existing) {
+                target_node_id = existing->node_id;
+            } else {
+                for (uint8_t i = 1; i <= MAX_NODES; i++) {
+                    if (!findNodeById(i)) {
+                        target_node_id = i;
+                        break;
+                    }
+                }
+            }
+        }
+        if (target_node_id == 0 || !isValidNodeId(target_node_id)) return;
+
+        ActiveNodeEntry *node = findOrCreateNode(frame.mac, target_node_id);
         if (!node) return;
+        
+        if (hello.node_id == 0) {
+            JoinAckPacket ack = {};
+            ack.type = PKT_JOIN_ACK;
+            ack.version = PROTOCOL_VERSION;
+            ack.assigned_node_id = node->node_id;
+            ack.system_state = system_state_;
+            ensurePeerPresent(node->mac);
+            esp_now_send(node->mac, (const uint8_t*)&ack, sizeof(ack));
+        }
 
         node->last_seen_ms = millis();
         node->channel_mask = hello.channel_mask;
@@ -389,6 +431,17 @@ private:
             node->invalid_packets++;
             return;
         }
+
+        // CRC Check
+        uint16_t rcv_crc = header.crc16;
+        DataPacketHeader *hdr_ptr = (DataPacketHeader*)frame.payload;
+        hdr_ptr->crc16 = 0;
+        uint16_t calc_crc = crc16_ccitt(frame.payload, expected_len);
+        if (calc_crc != rcv_crc) {
+            node->invalid_packets++;
+            return;
+        }
+        hdr_ptr->crc16 = rcv_crc;
 
         // Detección de pérdida por secuencia
         bool should_emit = false;
@@ -433,11 +486,37 @@ private:
         memcpy(&timing, frame.payload, sizeof(timing));
         if (timing.version != PROTOCOL_VERSION || !isValidNodeId(timing.node_id)) return;
 
+        // CRC Check
+        uint16_t rcv_crc = timing.crc16;
+        TimingInfoPacket *tim_ptr = (TimingInfoPacket*)frame.payload;
+        tim_ptr->crc16 = 0;
+        if (crc16_ccitt(frame.payload, sizeof(TimingInfoPacket)) != rcv_crc) {
+            return;
+        }
+        tim_ptr->crc16 = rcv_crc;
+
         ActiveNodeEntry *node = findNodeById(timing.node_id);
         if (node) node->last_seen_ms = millis();
 
         // Reenviar al PC como trama binaria
         sendBinaryMsg(SER_MSG_TIMING, (const uint8_t*)&timing, sizeof(timing));
+    }
+
+    void handleNodeTelemetry(const RxFrame &frame) {
+        if (frame.len != sizeof(NodeTelemetryPacket)) return;
+
+        NodeTelemetryPacket tel = {};
+        memcpy(&tel, frame.payload, sizeof(tel));
+        if (tel.version != PROTOCOL_VERSION || !isValidNodeId(tel.node_id)) return;
+
+        ActiveNodeEntry *node = findNodeById(tel.node_id);
+        if (node) node->last_seen_ms = millis();
+
+        // TELEMETRY,node_id,rssi,battery,temp,buf,ovf,tx_err,uptime
+        sendAsciiMsg("TELEMETRY,%u,%d,%u,%d,%u,%u,%u,%lu",
+                      tel.node_id, tel.rssi_dbm, tel.battery_pct, tel.temperature_c,
+                      tel.buffer_usage_pct, tel.overflow_count, tel.tx_errors,
+                      (unsigned long)tel.uptime_s);
     }
 
     // ============================================================
@@ -468,7 +547,7 @@ private:
         beacon.system_state = system_state_;
         beacon.active_nodes = active_count_;
         beacon.cycle_ms = CYCLE_MS;
-        beacon.slot_us = static_cast<uint16_t>(SLOT_US > 65535 ? 65535 : SLOT_US);
+        beacon.slot_us = SLOT_US;  // uint32_t: cabe sin truncar
         beacon.slot_guard_us = SLOT_GUARD_US;
         beacon.registration_window_ms = REGISTRATION_WINDOW_MS;
         beacon.sample_rate_hz = target_rate_hz_;

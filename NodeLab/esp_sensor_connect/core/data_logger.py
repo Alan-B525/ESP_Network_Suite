@@ -240,13 +240,24 @@ class DataLogger:
         last_idx = csv_info['last_written_index']
         start_idx = frame.first_sample_index
 
+        timing = self._timing_info.get(csv_key) or self._timing_info.get((frame.node_id, 255))
+        t0 = timing.t0_epoch_ms if timing else 0.0
+        dt_us = timing.dt_us if timing else 0.0
+        idx0 = timing.t0_sample_index if timing else 0
+
+        def get_ts(idx: int) -> str:
+            if dt_us == 0.0:
+                return ""
+            return f"{t0 + ((idx - idx0) * dt_us) / 1000.0:.3f}"
+
         # Si detectamos un salto (paquete perdido), insertamos NaNs
         if last_idx != -1 and start_idx > last_idx + 1:
             gap_size = start_idx - (last_idx + 1)
             # Para evitar cuelgues por errores gigantes, limitamos el gap
             if gap_size < 100000:
                 for i in range(gap_size):
-                    writer.writerow([last_idx + 1 + i, 'NaN'])
+                    idx = last_idx + 1 + i
+                    writer.writerow([get_ts(idx), idx, 'NaN'])
                     self.total_records += 1
 
         # Si recibimos datos solapados o atrasados (duplicados/desorden)
@@ -262,7 +273,7 @@ class DataLogger:
 
         # Escribimos las muestras verticalmente
         for val in values_to_write:
-            writer.writerow([curr_idx, val])
+            writer.writerow([get_ts(curr_idx), curr_idx, val])
             curr_idx += 1
             self.total_records += 1
 
@@ -299,7 +310,7 @@ class DataLogger:
             file_obj.write("# sample_rate_hz = unknown\n")
 
         writer = csv.writer(file_obj)
-        writer.writerow(['sample_index', 'value'])
+        writer.writerow(['timestamp_ms', 'sample_index', 'value'])
 
         self._csv_files[csv_key] = {
             'file': file_obj,

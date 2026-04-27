@@ -155,10 +155,24 @@ class WarnFrame:
     timestamp: datetime = field(default_factory=datetime.now)
 
 
+@dataclass
+class TelemetryFrame:
+    """Trama TELEMETRY."""
+    node_id: int
+    rssi_dbm: int
+    battery_pct: int
+    temperature_c: int
+    buffer_usage_pct: int
+    overflow_count: int
+    tx_errors: int
+    uptime_s: int
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
 # Tipo unión
 ParsedFrame = Union[
     DataFrame, TimingFrame, BeaconFrame, HelloFrame, JoinFrame,
-    TimeoutFrame, LossFrame, StatsFrame, BootFrame, WarnFrame, AckFrame
+    TimeoutFrame, LossFrame, StatsFrame, BootFrame, WarnFrame, AckFrame, TelemetryFrame
 ]
 
 
@@ -284,6 +298,8 @@ class ProtocolParser:
                 return self._parse_boot(line)
             elif line.startswith("WARN,"):
                 return self._parse_warn(line)
+            elif line.startswith("TELEMETRY,"):
+                return self._parse_telemetry(line)
             else:
                 return None
 
@@ -450,9 +466,22 @@ class ProtocolParser:
     @staticmethod
     def _parse_warn(line: str) -> WarnFrame:
         parts = line.split(",", 2)
-        return WarnFrame(
-            warn_type=parts[1] if len(parts) > 1 else "UNKNOWN",
-            detail=parts[2] if len(parts) > 2 else "",
+        warn_type = parts[1] if len(parts) > 1 else "UNKNOWN"
+        detail = parts[2] if len(parts) > 2 else ""
+        return WarnFrame(warn_type=warn_type, detail=detail)
+
+    @staticmethod
+    def _parse_telemetry(line: str) -> TelemetryFrame:
+        parts = line.split(',')
+        return TelemetryFrame(
+            node_id=int(parts[1]),
+            rssi_dbm=int(parts[2]),
+            battery_pct=int(parts[3]),
+            temperature_c=int(parts[4]),
+            buffer_usage_pct=int(parts[5]),
+            overflow_count=int(parts[6]),
+            tx_errors=int(parts[7]),
+            uptime_s=int(parts[8])
         )
 
     @staticmethod

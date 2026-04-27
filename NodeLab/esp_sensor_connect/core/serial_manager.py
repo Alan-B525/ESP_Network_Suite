@@ -33,7 +33,7 @@ import serial.tools.list_ports
 from core.protocol_parser import (
     ProtocolParser, DataFrame, TimingFrame, BeaconFrame, HelloFrame,
     JoinFrame, TimeoutFrame, LossFrame, StatsFrame, BootFrame, WarnFrame,
-    AckFrame,
+    AckFrame, TelemetryFrame
 )
 
 
@@ -77,6 +77,7 @@ class SerialManager:
         # ---- Estado de nodos ----
         self.active_nodes: list[str] = []  # MACs
         self.nodes_count: int = 0
+        self._node_telemetry: dict[int, TelemetryFrame] = {}
 
         # ---- Buffer circular de datos por nodo/canal (para la UI) ----
         # Estructura: {node_id: {channel_id: [float, float, ...]}}
@@ -108,9 +109,15 @@ class SerialManager:
         self._last_data_time: dict[int, float] = {}
         self._node_health: dict[int, bool] = {} # True: Healthy, False: Offline
         self._manager_running = True
+        self._auto_connect_cooldown: float = 0.0  # Timestamp hasta cuando NO intentar auto-connect
+        self._last_failed_port: str = ""  # Puerto que falló recientemente
         
         self._auto_connect_thread = threading.Thread(target=self._auto_connect_loop, daemon=True)
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+
+        # ---- Throttle de HELLO logging ----
+        self._last_hello_log_time: dict[int, float] = {}  # {node_id: last_log_timestamp}
+        self._hello_log_interval: float = 10.0  # Segundos entre logs de HELLO por nodo
 
         # ---- Callbacks para notificaciones a la UI ----
         self._on_status_callback: Optional[Callable] = None
@@ -202,6 +209,7 @@ class SerialManager:
                 port=port,
                 baudrate=baudrate,
                 timeout=timeout,
+                write_timeout=0.5,
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
@@ -223,7 +231,10 @@ class SerialManager:
             print(f"[SERIAL] Conectado a {port} @ {baudrate} baud")
 
             # Sincronizar hora del PC con el Base Station (v4)
-            self._sync_time()
+            if not self._sync_time():
+                print(f"[SERIAL] No se pudo enviar sync a {port}. Desconectando...")
+                self.disconnect()
+                return False
 
             if self._on_connection_change:
                 self._on_connection_change(True)
@@ -252,6 +263,7 @@ class SerialManager:
         self._serial = None
         self.is_connected = False
         self.is_acquiring = False
+        self._basestation_verified = False
         self.current_port = ""
         self.active_nodes = []
         self.nodes_count = 0
@@ -283,12 +295,16 @@ class SerialManager:
             if not command.endswith('\n'):
                 command += '\n'
 
-            self._serial.write(command.encode('utf-8'))
-            self._serial.flush()
+            ser = self._serial
+            if not ser:
+                return False
+
+            ser.write(command.encode('utf-8'))
+            ser.flush()
             print(f"[SERIAL] Comando enviado: {command.strip()}")
             return True
 
-        except serial.SerialException as e:
+        except (serial.SerialException, AttributeError) as e:
             print(f"[SERIAL] Error al enviar comando: {e}")
             return False
 
@@ -324,9 +340,10 @@ class SerialManager:
         """Envía la hora UTC del PC al Base Station para sincronizacion RTC."""
         import time
         epoch_ms = int(time.time() * 1000)
-        self.send_command(f"CMD_SET_TIME,{epoch_ms}")
-        print(f"[SERIAL] Hora sincronizada: {epoch_ms} ms")
-        return True
+        success = self.send_command(f"CMD_SET_TIME,{epoch_ms}")
+        if success:
+            print(f"[SERIAL] Hora sincronizada: {epoch_ms} ms")
+        return success
 
     def set_sample_rate(self, rate_hz: int) -> bool:
         """
@@ -424,26 +441,41 @@ class SerialManager:
     # ============================================================
 
     def _cobs_decode(self, data: bytes) -> bytes:
+        """Decodifica frame COBS con validación de integridad."""
+        if not data or len(data) < 2:
+            return b''
         decoded = bytearray()
         i = 0
-        while i < len(data):
-            code = data[i]
-            if code == 0:
-                break
-            i += 1
-            for _ in range(1, code):
-                if i >= len(data):
+        try:
+            while i < len(data):
+                code = data[i]
+                if code == 0:
                     break
-                decoded.append(data[i])
                 i += 1
-            if code < 0xFF and i < len(data):
-                decoded.append(0)
+                for _ in range(1, code):
+                    if i >= len(data):
+                        return b''  # Frame truncado → descartar
+                    decoded.append(data[i])
+                    i += 1
+                if code < 0xFF and i < len(data):
+                    decoded.append(0)
+        except (IndexError, ValueError):
+            return b''  # Frame corrupto → descartar
+        
+        # Validación mínima: debe tener al menos el byte de tipo de mensaje
+        if len(decoded) < 2:
+            return b''
         return bytes(decoded)
 
     def _reader_loop(self):
         """
         Bucle principal de lectura del puerto serie.
         *** SE EJECUTA EN UN THREAD SEPARADO ***
+        
+        Maneja desconexión USB abrupta de forma robusta:
+        - PermissionError/OSError → el dispositivo fue removido físicamente
+        - SerialException → error genérico de comunicación
+        Ambos casos cierran limpiamente y activan cooldown de auto-connect.
         """
         print("[SERIAL] Hilo de lectura iniciado")
 
@@ -482,13 +514,15 @@ class SerialManager:
                 else:
                     time.sleep(0.001)
 
+            except (PermissionError, OSError) as e:
+                # Dispositivo USB removido físicamente — ClearCommError, etc.
+                print(f"[SERIAL] Dispositivo USB desconectado: {e}")
+                self._handle_unexpected_disconnect()
+                break
+
             except serial.SerialException as e:
-                print(f"[SERIAL] Error de lectura: {e}")
-                self._running.clear()
-                self.is_connected = False
-                self.is_acquiring = False
-                if self._on_connection_change:
-                    self._on_connection_change(False)
+                print(f"[SERIAL] Error de lectura serial: {e}")
+                self._handle_unexpected_disconnect()
                 break
 
             except Exception as e:
@@ -497,12 +531,44 @@ class SerialManager:
 
         print("[SERIAL] Hilo de lectura finalizado")
 
+    def _handle_unexpected_disconnect(self):
+        """
+        Maneja desconexión inesperada del dispositivo USB.
+        Cierra limpiamente y establece cooldown para auto-connect.
+        """
+        failed_port = self.current_port
+        self._running.clear()
+        
+        # Cerrar el serial de forma segura
+        if self._serial:
+            try:
+                if self._serial.is_open:
+                    self._serial.close()
+            except Exception:
+                pass
+            self._serial = None
+        
+        self.is_connected = False
+        self.is_acquiring = False
+        self.current_port = ""
+        
+        # Cooldown de 5 segundos antes de intentar auto-connect de nuevo
+        self._auto_connect_cooldown = time.time() + 5.0
+        self._last_failed_port = failed_port
+        
+        print(f"[SERIAL] Desconexión detectada en {failed_port}. Cooldown 5s antes de reconectar.")
+        
+        if self._on_connection_change:
+            self._on_connection_change(False)
+
     # ============================================================
     # Distribucion interna de tramas
     # ============================================================
 
     def _dispatch_frame(self, frame):
         """Distribuye la trama parseada a los consumidores apropiados."""
+        self._basestation_verified = True
+        
         if isinstance(frame, DataFrame):
             self._handle_data_frame(frame)
         elif isinstance(frame, TimingFrame):
@@ -523,6 +589,8 @@ class SerialManager:
             print(f"[SERIAL] WARN: {frame.warn_type} - {frame.detail}")
         elif isinstance(frame, AckFrame):
             self._handle_ack_frame(frame)
+        elif isinstance(frame, TelemetryFrame):
+            self._handle_telemetry_frame(frame)
 
     def _handle_data_frame(self, frame: DataFrame):
         """Procesa una trama de datos: encola para logger y actualiza buffer UI."""
@@ -607,7 +675,7 @@ class SerialManager:
         self.nodes_count = frame.active_nodes
 
     def _handle_join_event(self, frame):
-        """Procesa HELLO o NODE_JOIN: registra MAC del nodo."""
+        """Procesa HELLO o NODE_JOIN: registra MAC del nodo con throttle de logging."""
         self._node_macs[frame.node_id] = frame.mac
         if frame.mac and frame.mac not in self.active_nodes:
             self.active_nodes.append(frame.mac)
@@ -617,7 +685,17 @@ class SerialManager:
         self._last_data_time[frame.node_id] = time.time()
 
         event_type = "JOIN" if isinstance(frame, JoinFrame) else "HELLO"
-        print(f"[SERIAL] {event_type}: Nodo {frame.node_id} - {frame.mac}")
+        
+        # Throttle HELLO logging: solo 1 log por nodo cada _hello_log_interval segundos
+        if event_type == "HELLO":
+            now = time.time()
+            last_log = self._last_hello_log_time.get(frame.node_id, 0)
+            if now - last_log >= self._hello_log_interval:
+                print(f"[SERIAL] {event_type}: Nodo {frame.node_id} - {frame.mac}")
+                self._last_hello_log_time[frame.node_id] = now
+        else:
+            # JOIN siempre se loguea (evento importante)
+            print(f"[SERIAL] {event_type}: Nodo {frame.node_id} - {frame.mac}")
 
         if self._on_node_event:
             self._on_node_event(frame)
@@ -669,30 +747,75 @@ class SerialManager:
         if self._on_ack_callback:
             self._on_ack_callback(frame)
 
+    def _handle_telemetry_frame(self, frame: TelemetryFrame):
+        with self._lock:
+            self._node_telemetry[frame.node_id] = frame
+
+    def get_node_telemetry(self, node_id: int) -> Optional[TelemetryFrame]:
+        with self._lock:
+            return self._node_telemetry.get(node_id)
+
     # ============================================================
     # Tareas en background (Auto-connect & Watchdog)
     # ============================================================
 
     def _auto_connect_loop(self):
         """Intenta conectarse automaticamente a un puerto disponible si estamos desconectados."""
+        tested_ports = set()
+        
         while self._manager_running:
             if not self.is_connected:
+                # Respetar cooldown después de desconexión abrupta
+                if time.time() < self._auto_connect_cooldown:
+                    time.sleep(1.0)
+                    continue
+                
                 ports = self.list_available_ports()
-                if ports:
-                    # Intenta conectar al primero de la lista (suele ser el ultimo enchufado en Windows o CH340)
-                    # Idealmente se podria filtrar por 'hwid' (ej: VID:PID de los ESP32 CH340/CP2102)
-                    target_port = ports[-1]['device'] # Usar el mas reciente/alto suele ser util
-                    # Buscamos especificamente algun indicio de CH340 o Silicon Labs
-                    for p in ports:
-                        if 'CH340' in p.get('description', '') or 'Silicon' in p.get('description', '') or 'UART' in p.get('description', ''):
+                if not ports:
+                    tested_ports.clear()
+                    time.sleep(3.0)
+                    continue
+                
+                available = [p['device'] for p in ports if p['device'] not in tested_ports]
+                
+                if not available:
+                    # Si probamos todos y ninguno funcionó, reseteamos para volver a intentar
+                    tested_ports.clear()
+                    time.sleep(3.0)
+                    continue
+                    
+                target_port = available[-1]
+                # Buscamos especificamente algun indicio de chips USB-Serial comunes
+                for p in ports:
+                    if p['device'] in available:
+                        desc = p.get('description', '')
+                        if 'CH340' in desc or 'Silicon' in desc or 'UART' in desc or 'CP210' in desc:
                             target_port = p['device']
                             break
-                    print(f"[AUTO-CONNECT] Intentando conexion con {target_port}...")
-                    if self.connect(target_port):
-                        print(f"[AUTO-CONNECT] ¡Conectado automaticamente a {target_port}!")
-            
-            # Chequeo cada 3 segundos si estamos desconectados
-            time.sleep(3.0)
+                            
+                print(f"[AUTO-CONNECT] Intentando conexion con {target_port}...")
+                if self.connect(target_port):
+                    print(f"[AUTO-CONNECT] Conexion USB abierta en {target_port}. Esperando confirmacion...")
+                    # Esperamos hasta 2.5s para recibir algun paquete que confirme la Base Station
+                    for _ in range(25):
+                        time.sleep(0.1)
+                        if not self.is_connected or getattr(self, '_basestation_verified', False):
+                            break
+                            
+                    if not self.is_connected or not getattr(self, '_basestation_verified', False):
+                        print(f"[AUTO-CONNECT] {target_port} no respondio como Base Station (timeout). Ignorando...")
+                        self.disconnect()
+                        tested_ports.add(target_port)
+                    else:
+                        print(f"[AUTO-CONNECT] ¡{target_port} confirmado como Base Station!")
+                        tested_ports.clear()
+                else:
+                    print(f"[AUTO-CONNECT] Fallo al abrir {target_port}. Intentando con otro...")
+                    tested_ports.add(target_port)
+                    self._auto_connect_cooldown = time.time() + 1.0
+            else:
+                tested_ports.clear()
+                time.sleep(3.0)
 
     def _watchdog_loop(self):
         """Vigila la llegada de datos; si pasan 5 segundos sin datos en un nodo activo, lo marca como caido."""

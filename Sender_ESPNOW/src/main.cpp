@@ -28,7 +28,7 @@ using namespace tdma;
 // ============================================================
 
 #define WIFI_CHANNEL 1
-#define NODE_ID 1
+static uint8_t node_id = 0; // Assigned by gateway
 #define BASESTATION_MAC {0xB8, 0xF8, 0x62, 0x04, 0x5F, 0x98}
 
 #define NUM_CHANNELS 4
@@ -59,7 +59,7 @@ struct InflightEntry {
 static uint8_t basestation_mac[6] = BASESTATION_MAC;
 
 // ---- Adquisición ----
-static hw_timer_t *acq_timer = nullptr;
+static esp_timer_handle_t acq_timer = nullptr;
 static portMUX_TYPE acq_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t pending_ticks = 0;
 
@@ -87,7 +87,7 @@ static bool sync_locked = false;
 static uint64_t sync_anchor_us = 0;
 static uint64_t last_sync_us = 0;
 static uint32_t tdma_cycle_us = 0;
-static uint16_t tdma_slot_us = 0;
+static uint32_t tdma_slot_us = 0;
 static uint16_t tdma_guard_us = 0;
 static uint8_t slot_schedule[MAX_SLOTS] = {};
 static uint8_t system_state_from_gw = STATE_DISCOVERY;
@@ -112,6 +112,9 @@ static uint32_t overflow_count = 0;
 static int16_t sine_lut[256];
 static uint16_t sine_phase[NUM_CHANNELS] = {};
 static uint32_t prng_state = 0x5A17C3E5u;
+
+// ---- Telemetry ----
+static uint16_t total_tx_errors = 0;
 
 // ============================================================
 // Utilidades
@@ -222,7 +225,8 @@ static void inflightReset() {
 // Adquisición — ISR + tarea
 // ============================================================
 
-void IRAM_ATTR onAcqTimerISR() {
+void IRAM_ATTR onAcqTimerISR(void* arg) {
+    (void)arg;
     portENTER_CRITICAL_ISR(&acq_mux);
     if (pending_ticks < 50000U) pending_ticks++;
     portEXIT_CRITICAL_ISR(&acq_mux);
@@ -274,9 +278,11 @@ static void reconfigureTimer(uint32_t new_rate_hz) {
     current_rate_hz = new_rate_hz;
     current_period_us = 1000000UL / new_rate_hz;
 
-    timerAlarmDisable(acq_timer);
-    timerAlarmWrite(acq_timer, current_period_us, true);
-    timerAlarmEnable(acq_timer);
+    // esp_timer: stop → re-start con nuevo periodo
+    if (acq_timer) {
+        esp_timer_stop(acq_timer);
+        esp_timer_start_periodic(acq_timer, current_period_us);
+    }
 
     Serial.printf("NODE: Rate reconfigured to %lu Hz (period %lu us)\n",
                   (unsigned long)current_rate_hz, (unsigned long)current_period_us);
@@ -293,6 +299,7 @@ static void startAcquisition() {
         acked[ch] = 0;
     }
     inflightReset();
+    next_seq = 1;
     overflow_count = 0;
     timing_info_sent = false;
     acq_running = true;
@@ -303,6 +310,9 @@ static void stopAcquisition() {
     if (!acq_running) return;
     acq_running = false;
     timing_info_sent = false;
+    portENTER_CRITICAL(&acq_mux);
+    pending_ticks = 0;
+    portEXIT_CRITICAL(&acq_mux);
     Serial.printf("NODE: Acquisition stopped (overflows=%lu)\n",
                   (unsigned long)overflow_count);
 }
@@ -315,12 +325,14 @@ static void sendTimingInfo() {
     TimingInfoPacket pkt = {};
     pkt.type = PKT_TIMING_INFO;
     pkt.version = PROTOCOL_VERSION;
-    pkt.node_id = NODE_ID;
+    pkt.node_id = node_id;
     pkt.channel_id = 0xFF;
     pkt.sample_rate_hz = current_rate_hz;
     pkt.dt_us = current_period_us;
     pkt.t0_epoch_ms = acq_t0_epoch_ms;
     pkt.t0_sample_index = acq_t0_sample_index;
+    pkt.crc16 = 0;
+    pkt.crc16 = crc16_ccitt((const uint8_t *)&pkt, sizeof(pkt));
 
     esp_err_t err = esp_now_send(basestation_mac,
                                   (const uint8_t *)&pkt, sizeof(pkt));
@@ -362,12 +374,13 @@ static uint8_t sendDataForChannel(uint8_t ch) {
     DataPacketHeader header = {};
     header.type = PKT_DATA;
     header.version = PROTOCOL_VERSION;
-    header.node_id = NODE_ID;
+    header.node_id = node_id;
     header.channel_id = ch;
     header.sample_encoding = encoding;
     header.sequence_id = next_seq;
     header.sample_count = count;
     header.first_sample_index = sent[ch];
+    header.crc16 = 0;
 
     memcpy(buf, &header, DATA_HEADER_SIZE);
 
@@ -389,6 +402,10 @@ static uint8_t sendDataForChannel(uint8_t ch) {
     }
 
     size_t pkt_len = dataPacketExpectedLength(header);
+    
+    DataPacketHeader* hdr = (DataPacketHeader*)buf;
+    hdr->crc16 = crc16_ccitt(buf, pkt_len);
+    
     esp_err_t err = esp_now_send(basestation_mac, buf, pkt_len);
 
     if (err == ESP_OK) {
@@ -446,7 +463,7 @@ static void sendNodeHello() {
     NodeHelloPacket hello = {};
     hello.type = PKT_NODE_HELLO;
     hello.version = PROTOCOL_VERSION;
-    hello.node_id = NODE_ID;
+    hello.node_id = node_id;
     hello.channel_mask = (1U << NUM_CHANNELS) - 1;
     hello.channel_count = NUM_CHANNELS;
     hello.flags = 0;
@@ -461,7 +478,9 @@ static void sendNodeHello() {
 
 static void onDataSent(const uint8_t *mac, esp_now_send_status_t status) {
     (void)mac;
-    (void)status;
+    if (status != ESP_NOW_SEND_SUCCESS) {
+        total_tx_errors++;
+    }
 }
 
 static void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
@@ -470,14 +489,27 @@ static void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 
     uint8_t pkt_type = data[0];
 
-    // ---- Direct ACK ----
     if (pkt_type == PKT_DIRECT_ACK && len >= (int)sizeof(DirectAckPacket)) {
         DirectAckPacket ack;
         memcpy(&ack, data, sizeof(ack));
-        if (ack.version == PROTOCOL_VERSION && ack.node_id == NODE_ID) {
+        if (ack.version == PROTOCOL_VERSION && ack.node_id == node_id) {
             // LOSSLESS: process ACK to advance acked[] pointers
             inflightProcessAck(ack.highest_acked_seq);
 
+            portENTER_CRITICAL(&state_mux);
+            system_state_from_gw = ack.system_state;
+            portEXIT_CRITICAL(&state_mux);
+        }
+        return;
+    }
+
+    // ---- Join ACK ----
+    if (pkt_type == PKT_JOIN_ACK && len >= (int)sizeof(JoinAckPacket)) {
+        JoinAckPacket ack;
+        memcpy(&ack, data, sizeof(ack));
+        if (ack.version == PROTOCOL_VERSION) {
+            node_id = ack.assigned_node_id;
+            Serial.printf("NODE: Assigned ID = %u\n", node_id);
             portENTER_CRITICAL(&state_mux);
             system_state_from_gw = ack.system_state;
             portEXIT_CRITICAL(&state_mux);
@@ -520,7 +552,7 @@ static void onDataRecv(const uint8_t *mac, const uint8_t *data, int len) {
 
     // Process beacon ACKs too
     for (uint8_t i = 0; i < beacon.active_nodes; i++) {
-        if (beacon.ack_map[i].node_id == NODE_ID) {
+        if (beacon.ack_map[i].node_id == node_id) {
             inflightProcessAck(beacon.ack_map[i].highest_acked_seq);
             break;
         }
@@ -544,8 +576,8 @@ void setup() {
     esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
     Serial.printf("\n=== Nodo ESP32-C3 TDMA/ESP-NOW v4 LOSSLESS ===\n");
-    Serial.printf("NODE: id=%u ch=%u rate=%lu Hz ring=%u\n",
-                  NODE_ID, NUM_CHANNELS,
+    Serial.printf("NODE: ch=%u rate=%lu Hz ring=%u\n",
+                  NUM_CHANNELS,
                   (unsigned long)current_rate_hz, SAMPLE_RING_CAPACITY);
 
     if (esp_now_init() != ESP_OK) {
@@ -567,10 +599,16 @@ void setup() {
 
     xTaskCreatePinnedToCore(acquisitionTask, "acq", 4096, nullptr, 3, nullptr, 0);
 
-    acq_timer = timerBegin(0, 80, true);
-    timerAttachInterrupt(acq_timer, &onAcqTimerISR, true);
-    timerAlarmWrite(acq_timer, current_period_us, true);
-    timerAlarmEnable(acq_timer);
+    // ---- Configurar timer de adquisición con esp_timer (estable en todas las versiones) ----
+    const esp_timer_create_args_t timer_args = {
+        .callback = &onAcqTimerISR,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,  // ISR context
+        .name = "acq_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&timer_args, &acq_timer);
+    esp_timer_start_periodic(acq_timer, current_period_us);
 
     Serial.println("NODE: Waiting for BEACON...");
 }
@@ -643,7 +681,7 @@ void loop() {
             uint32_t data_phase = phase - reg_us;
             uint32_t current_slot = data_phase / slot_us_val;
 
-            if (current_slot < MAX_SLOTS && local_schedule[current_slot] == NODE_ID) {
+            if (current_slot < MAX_SLOTS && local_schedule[current_slot] == node_id && node_id != 0) {
                 static uint32_t last_tx_slot = UINT32_MAX;
                 uint32_t cycle_idx = elapsed / cycle_us;
                 uint32_t slot_key = cycle_idx * MAX_SLOTS + current_slot;
@@ -675,13 +713,33 @@ void loop() {
                       (unsigned long)overflow_count);
 
         // Buffer warning
+        uint8_t max_usage_pct = 0;
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
             uint32_t usage = produced[ch] - acked[ch];
+            uint8_t pct = (usage * 100) / SAMPLE_RING_CAPACITY;
+            if (pct > max_usage_pct) max_usage_pct = pct;
+            
             if (usage > SAMPLE_RING_CAPACITY * 90 / 100) {
                 Serial.printf("NODE: WARN ch%u buffer %lu/%u (%.0f%%)\n",
                               ch, (unsigned long)usage, SAMPLE_RING_CAPACITY,
                               100.0f * usage / SAMPLE_RING_CAPACITY);
             }
+        }
+        
+        if (node_id > 0) {
+            NodeTelemetryPacket tel = {};
+            tel.type = PKT_NODE_TELEMETRY;
+            tel.version = PROTOCOL_VERSION;
+            tel.node_id = node_id;
+            tel.flags = 0;
+            tel.rssi_dbm = 0; // Not available in ESP-NOW recv cb in IDF v4
+            tel.battery_pct = 100;
+            tel.temperature_c = 40;
+            tel.buffer_usage_pct = max_usage_pct;
+            tel.overflow_count = (uint16_t)(overflow_count > 65535 ? 65535 : overflow_count);
+            tel.tx_errors = total_tx_errors;
+            tel.uptime_s = now_ms / 1000;
+            esp_now_send(basestation_mac, (const uint8_t *)&tel, sizeof(tel));
         }
     }
 

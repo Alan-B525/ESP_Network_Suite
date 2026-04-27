@@ -1,33 +1,33 @@
 #pragma once
 
 // ============================================================
-// tdma_protocol.h — Protocolo TDMA v4 para ESP-NOW Sensor Network
+// tdma_protocol.h — Protocolo TDMA v5 para ESP-NOW Sensor Network
 // ============================================================
 //
 // ARCHIVO CANÓNICO COMPARTIDO.
-// Cambios v3 → v4:
-//   - SystemState: DISCOVERY / IDLE / ACQUIRING (control desde PC)
+// Cambios v4 → v5:
+//   - CRC-16 CCITT añadido a DataPacketHeader y TimingInfoPacket.
+//   - Auto-ID: Gateway asigna ID mediante PKT_JOIN_ACK y MAC address.
+//   - PKT_NODE_TELEMETRY para transmitir métricas en tiempo real.
+//   - SystemState: DISCOVERY / IDLE / ACQUIRING
 //   - TDMA Round-Robin: 10 slots fijos, llenados con nodos activos
 //   - Multi-canal: hasta 4 canales/sensores por nodo
-//   - Timing eficiente: t0 + dt + sample_index (sin timestamp por muestra)
-//   - PKT_TIMING_INFO: nuevo paquete para sincronización temporal
-//   - Beacon con rtc_epoch_ms para sincronización de hora
-//   - Comandos serial: CMD_START, CMD_STOP, CMD_SET_TIME
 //
-// Formato serial v4 (Base Station → PC):
+// Formato serial v5 (Base Station → PC):
 //   DATA,node_id,ch_id,seq,encoding,first_idx,sample_count,val1,val2,...
 //   TIMING,node_id,ch_id,sample_rate_hz,dt_us,t0_epoch_ms,t0_sample_idx
 //   BEACON,seq,STATE=s,NODES=n,SLOT_US=us,RATE=hz,RTC=ms,SCHED=id;id;...,ACKS=id:seq;...
 //   HELLO,node_id,mac,CH=mask,RATE=hz
 //   NODE_JOIN,node_id,mac
 //   NODE_TIMEOUT,node_id,mac
+//   TELEMETRY,node_id,rssi,battery,temp,buf,ovf,tx_err,uptime
 //   LOSS,node_id,EXPECTED=x,GOT=y
 //   BOOT,key[,value]
 //   WARN,type,detail
 //   ACK,command,result
 //   STATS_BEGIN / STATS,... / NODE,... / STATS_END
 //
-// Comandos serial v4 (PC → Base Station):
+// Comandos serial v5 (PC → Base Station):
 //   CMD_START\n          → ACK,CMD_START,OK
 //   CMD_STOP\n           → ACK,CMD_STOP,OK
 //   CMD_SET_TIME,{ms}\n  → ACK,CMD_SET_TIME,OK
@@ -41,7 +41,7 @@
 namespace tdma {
 
 // ---- Versión del protocolo ----
-constexpr uint8_t PROTOCOL_VERSION = 4;
+constexpr uint8_t PROTOCOL_VERSION = 5;
 
 // ---- Límites de red ----
 constexpr uint8_t MAX_NODES = 10;
@@ -84,6 +84,8 @@ enum PacketType : uint8_t {
     PKT_DATA         = 0x13,
     PKT_DIRECT_ACK   = 0x14,
     PKT_TIMING_INFO  = 0x15,
+    PKT_NODE_TELEMETRY = 0x16,
+    PKT_JOIN_ACK     = 0x17,
 };
 
 enum SerialMsgType : uint8_t {
@@ -116,7 +118,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  system_state;                  // SystemState
     uint8_t  active_nodes;
     uint16_t cycle_ms;
-    uint16_t slot_us;
+    uint32_t slot_us;                       // Duración de slot en µs (puede ser > 65535)
     uint16_t slot_guard_us;
     uint16_t registration_window_ms;
     uint16_t sample_rate_hz;                // Tasa de muestreo objetivo (configurable)
@@ -126,7 +128,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  slot_schedule[MAX_SLOTS];      // Round-robin: node_id por slot
     BeaconAckEntry ack_map[MAX_NODES];
 } BeaconSyncPacket;
-// sizeof = 1+1+1+1+2+2+2+2+2+2+4+8+10+40 = 78 bytes
+// sizeof = 1+1+1+1+2+4+2+2+2+2+4+8+10+40 = 80 bytes
 
 // ---- Node Hello (nodo → gateway) ----
 typedef struct __attribute__((packed)) {
@@ -151,8 +153,9 @@ typedef struct __attribute__((packed)) {
     uint16_t sequence_id;                   // Secuencia global por nodo
     uint16_t sample_count;
     uint32_t first_sample_index;            // Índice global del primer sample
+    uint16_t crc16;                         // CRC-16 CCITT del payload + header (sin incluir crc16)
 } DataPacketHeader;
-// sizeof = 14 bytes
+// sizeof = 16 bytes
 
 // ---- Timing Info (nodo → gateway, reenviado a PC) ----
 typedef struct __attribute__((packed)) {
@@ -164,8 +167,9 @@ typedef struct __attribute__((packed)) {
     uint32_t dt_us;                         // Periodo en µs
     uint64_t t0_epoch_ms;                   // Hora UTC del sample index t0
     uint32_t t0_sample_index;               // Índice correspondiente a t0
+    uint16_t crc16;                         // CRC-16 CCITT
 } TimingInfoPacket;
-// sizeof = 24 bytes
+// sizeof = 26 bytes
 
 // ---- Direct ACK (gateway → nodo unicast) ----
 typedef struct __attribute__((packed)) {
@@ -177,6 +181,30 @@ typedef struct __attribute__((packed)) {
     uint32_t gateway_rx_us;
 } DirectAckPacket;
 // sizeof = 10 bytes
+
+// ---- Join ACK (gateway → nodo unicast) ----
+typedef struct __attribute__((packed)) {
+    uint8_t  type;                          // PKT_JOIN_ACK
+    uint8_t  version;
+    uint8_t  assigned_node_id;
+    uint8_t  system_state;
+} JoinAckPacket;
+// sizeof = 4 bytes
+
+// ---- Node Telemetry (nodo → gateway) ----
+typedef struct __attribute__((packed)) {
+    uint8_t  type;            // PKT_NODE_TELEMETRY = 0x16
+    uint8_t  version;
+    uint8_t  node_id;
+    uint8_t  flags;
+    int8_t   rssi_dbm;       // RSSI del último beacon recibido
+    uint8_t  battery_pct;    // Batería real (ADC del VCC)
+    int8_t   temperature_c;  // Temperatura interna del ESP32
+    uint8_t  buffer_usage_pct; // % del ring buffer usado
+    uint16_t overflow_count; // Overflows acumulados
+    uint16_t tx_errors;      // Errores de TX acumulados
+    uint32_t uptime_s;       // Uptime del nodo en segundos
+} NodeTelemetryPacket;       // 16 bytes
 
 // ============================================================
 // Constantes derivadas
@@ -190,6 +218,21 @@ constexpr size_t DATA_HEADER_SIZE = sizeof(DataPacketHeader);
 
 inline bool isValidNodeId(uint8_t node_id) {
     return node_id >= 1 && node_id <= MAX_NODES;
+}
+
+inline uint16_t crc16_ccitt(const uint8_t *data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (uint8_t j = 0; j < 8; ++j) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
 }
 
 inline bool isValidChannelId(uint8_t channel_id) {

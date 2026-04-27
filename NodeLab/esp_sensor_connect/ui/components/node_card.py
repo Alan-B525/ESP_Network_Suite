@@ -7,7 +7,6 @@ de un nodo inalambrico: estado, metricas, sparkline, y alertas
 visuales basadas en la calidad del enlace.
 """
 
-import random
 import flet as ft
 import flet.canvas as cv
 
@@ -114,18 +113,15 @@ class NodeCard(ft.Card):
             font_family=FONT_MONO, weight=ft.FontWeight.W_500,
         )
 
-        # Telemetria simulada
+        # Telemetria (N/A hasta que el firmware lo implemente)
         self._battery_text = ft.Text(
-            "100%", size=9, color=STATUS_OK,
+            "N/A", size=9, color=TEXT_TERTIARY,
             font_family=FONT_MONO, weight=ft.FontWeight.W_500,
         )
         self._rssi_text = ft.Text(
-            "-60 dBm", size=9, color=STATUS_OK,
+            "N/A", size=9, color=TEXT_TERTIARY,
             font_family=FONT_MONO, weight=ft.FontWeight.W_500,
         )
-        
-        self._battery_level = 100.0 - (node_id * 2) # Diferente para cada nodo
-        self._rssi_base = -60 - (node_id * 3)
 
         # Barra de perdida
         self._loss_bar = ft.ProgressBar(
@@ -284,27 +280,6 @@ class NodeCard(ft.Card):
         self._seq_text.value = f"SEQ {sequence}"
         self._packets_text.value = f"{packets:,} pkt"
 
-        # Simular Bateria y RSSI
-        self._battery_level = max(0, self._battery_level - random.uniform(0.001, 0.005))
-        current_rssi = self._rssi_base + random.uniform(-3, 3)
-        
-        self._battery_text.value = f"{int(self._battery_level)}%"
-        self._rssi_text.value = f"{int(current_rssi)} dBm"
-        
-        if self._battery_level < 20:
-            self._battery_text.color = STATUS_CRITICAL
-        elif self._battery_level < 50:
-            self._battery_text.color = STATUS_WARNING
-        else:
-            self._battery_text.color = STATUS_OK
-            
-        if current_rssi < -85:
-            self._rssi_text.color = STATUS_CRITICAL
-        elif current_rssi < -75:
-            self._rssi_text.color = STATUS_WARNING
-        else:
-            self._rssi_text.color = STATUS_OK
-
         # Perdida de paquetes con coloreo semantico
         self._loss_bar.value = min(loss_rate / 100.0, 1.0)
         self._loss_text.value = f"{loss_rate:.1f}%"
@@ -410,3 +385,23 @@ class NodeCard(ft.Card):
             self.update()
         except Exception:
             pass
+
+    def update_telemetry(self, battery_pct: int, rssi_dbm: int):
+        self._battery_text.value = f"{battery_pct}%"
+        self._rssi_text.value = f"{rssi_dbm} dBm"
+        
+        if battery_pct < 20:
+            self._battery_text.color = STATUS_CRITICAL
+        elif battery_pct < 50:
+            self._battery_text.color = STATUS_WARNING
+        else:
+            self._battery_text.color = STATUS_OK
+            
+        if rssi_dbm < -85:
+            self._rssi_text.color = STATUS_CRITICAL
+        elif rssi_dbm < -75:
+            self._rssi_text.color = STATUS_WARNING
+        else:
+            self._rssi_text.color = STATUS_OK
+        
+        self._safe_update()

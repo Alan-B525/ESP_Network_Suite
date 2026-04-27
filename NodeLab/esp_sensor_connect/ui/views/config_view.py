@@ -111,24 +111,28 @@ class ConfigView(ft.Column):
         )
 
         # ============================================================
-        # SECCION 2: Parametros TDMA
+        # SECCION 2: Parametros de Adquisicion
         # ============================================================
 
         self._freq_input = input_field(
-            label="Frecuencia TDMA (Hz)", value=self._tdma_freq, width=200,
+            label="Sample Rate (Hz)", value=self._tdma_freq, width=200,
             icon=ft.Icons.SPEED_ROUNDED,
         )
-        self._slot_input = input_field(
-            label="Duracion Slot (ms)", value=self._tdma_slot, width=200,
-            icon=ft.Icons.TIMER_ROUNDED,
+
+        # Info de solo lectura — estos son parámetros compilados en el firmware
+        self._slot_info = ft.Text(
+            "Slot: 90ms | Ciclo: 1000ms | Guard: 200µs",
+            size=11, color=TEXT_TERTIARY,
+            font_family=FONT_MONO, italic=True,
         )
-        self._max_nodes_input = input_field(
-            label="Max. Nodos", value=self._tdma_max_nodes, width=200,
-            icon=ft.Icons.DEVICE_HUB_ROUNDED,
+        self._max_nodes_info = ft.Text(
+            "Max Nodos: 10 | Max Slots: 10 | Max Canales/Nodo: 4",
+            size=11, color=TEXT_TERTIARY,
+            font_family=FONT_MONO, italic=True,
         )
 
         self._apply_tdma_btn = primary_button(
-            "Aplicar Configuracion", icon=ft.Icons.SEND_ROUNDED,
+            "Aplicar Sample Rate", icon=ft.Icons.SEND_ROUNDED,
             on_click=self._on_apply_tdma, color=STATUS_OK,
         )
 
@@ -137,14 +141,15 @@ class ConfigView(ft.Column):
             content=ft.Column(
                 controls=[
                     ft.Row(
-                        controls=[self._freq_input, self._slot_input,
-                                  self._max_nodes_input],
+                        controls=[self._freq_input],
                         spacing=SPACE_LG,
                         vertical_alignment=ft.CrossAxisAlignment.END,
                     ),
+                    self._slot_info,
+                    self._max_nodes_info,
                     self._apply_tdma_btn,
                 ],
-                spacing=SPACE_LG,
+                spacing=SPACE_MD,
             ),
         )
 
@@ -286,7 +291,7 @@ class ConfigView(ft.Column):
 
         # Section labels
         lbl_conn = self._section_label("CONEXION SERIE")
-        lbl_tdma = self._section_label("PARAMETROS TDMA")
+        lbl_tdma = self._section_label("PARAMETROS DE ADQUISICION")
         lbl_alias = self._section_label("IDENTIFICACION DE NODOS")
         lbl_term = self._section_label("TERMINAL DE COMANDOS")
 
@@ -409,18 +414,26 @@ class ConfigView(ft.Column):
             self._show_snackbar("No hay conexion activa", STATUS_WARNING)
             return
 
-        cmds = [
-            f"CMD:SET_FREQ={self._freq_input.value}",
-            f"CMD:SET_SLOT={self._slot_input.value}",
-            f"CMD:SET_MAX_NODES={self._max_nodes_input.value}",
-        ]
-        for cmd in cmds:
-            ok = self._serial_manager.send_command(cmd)
-            s = "OK" if ok else "FAIL"
-            self._log(f"{s} > {cmd}")
+        rate_str = self._freq_input.value.strip()
+        try:
+            rate_hz = int(rate_str)
+        except ValueError:
+            self._show_snackbar(f"Valor inválido: '{rate_str}'. Ingresa un número entero.", STATUS_CRITICAL)
+            return
+        
+        if rate_hz < 1 or rate_hz > 10000:
+            self._show_snackbar(f"Rate fuera de rango: {rate_hz} Hz (válido: 1-10000)", STATUS_WARNING)
+            return
+        
+        ok = self._serial_manager.set_sample_rate(rate_hz)
+        if ok:
+            self._log(f"OK > CMD_SET_RATE,{rate_hz}")
+            self._show_snackbar(f"Sample rate configurado a {rate_hz} Hz", STATUS_OK)
+        else:
+            self._log(f"FAIL > CMD_SET_RATE,{rate_hz}")
+            self._show_snackbar("Error al enviar comando", STATUS_CRITICAL)
 
         self._save_config()
-        self._show_snackbar("Configuracion TDMA enviada", STATUS_OK)
 
     # ============================================================
     # Handlers - Identificacion
@@ -532,8 +545,6 @@ class ConfigView(ft.Column):
             "port": self._selected_port,
             "baudrate": self._selected_baudrate,
             "tdma_freq": self._freq_input.value,
-            "tdma_slot": self._slot_input.value,
-            "tdma_max_nodes": self._max_nodes_input.value
         }
         try:
             with open(self._config_file, "w") as f:

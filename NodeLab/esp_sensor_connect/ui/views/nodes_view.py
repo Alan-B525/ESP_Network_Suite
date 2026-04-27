@@ -205,13 +205,19 @@ class NodesView(ft.Column):
                 alias = self._serial_manager.get_node_alias(mac)
                 card.set_alias(alias)
             
-            data = self._serial_manager.get_node_data(nid, 10)
-            if data:
-                # Find latest packet for CH0 (primary)
-                latest = next((p for p in reversed(data) if p.channel_id == 0), data[-1])
-                pkts = self._serial_manager.packets_received.get(nid, 0)
-                loss = self._serial_manager.get_packet_loss_rate(nid)
-                card.update_data(latest.values, latest.sequence, pkts, loss)
+            # Obtener últimos valores del canal 0 (primario) para la tarjeta
+            values = self._serial_manager.get_node_data(nid, 0, count=20)
+            pkts = self._serial_manager.packets_received.get(nid, 0)
+            loss = self._serial_manager.get_packet_loss_rate(nid)
+            
+            if values:
+                # get_node_data retorna list[float] — valores decimados del canal
+                # Usamos seq desde packets_received como proxy de secuencia
+                card.update_data(values, pkts, pkts, loss)
+                
+            tel = self._serial_manager.get_node_telemetry(nid)
+            if tel:
+                card.update_telemetry(tel.battery_pct, tel.rssi_dbm)
                 
             if is_healthy:
                 active_count += 1

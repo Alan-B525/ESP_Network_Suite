@@ -90,6 +90,7 @@ class MainWindow:
             "START", icon=ft.Icons.PLAY_ARROW_ROUNDED,
             on_click=self._on_start_stop, color=STATUS_OK,
         )
+        self._start_btn.disabled = True
 
         # ---- Views ----
         self._dashboard_view = DashboardView(serial_manager, page)
@@ -405,11 +406,12 @@ class MainWindow:
         self._acquisition_start_time = time.time()
         self._timer_task = self._page.run_task(self._timer_loop)
 
-        # Update button to STOP state
         self._start_btn.text = "STOP"
         self._start_btn.icon = ft.Icons.STOP_ROUNDED
         self._start_btn.bgcolor = STATUS_CRITICAL
         self._start_btn.color = "#FFFFFF"
+        if hasattr(self._start_btn, "style") and self._start_btn.style:
+            self._start_btn.style.shadow_color = ft.Colors.with_opacity(0.2, STATUS_CRITICAL)
 
         self._status_indicator.set_acquiring()
         self._timer_text.color = STATUS_ACQUIRING
@@ -433,6 +435,8 @@ class MainWindow:
         self._start_btn.icon = ft.Icons.PLAY_ARROW_ROUNDED
         self._start_btn.bgcolor = STATUS_OK
         self._start_btn.color = BG_DEEPEST
+        if hasattr(self._start_btn, "style") and self._start_btn.style:
+            self._start_btn.style.shadow_color = ft.Colors.with_opacity(0.2, STATUS_OK)
 
         self._status_indicator.set_connected(self._serial_manager.current_port)
         self._timer_text.color = TEXT_TERTIARY
@@ -473,11 +477,18 @@ class MainWindow:
         if connected:
             self._status_indicator.set_connected(
                 self._serial_manager.current_port)
+            self._start_btn.disabled = False
         else:
             self._status_indicator.set_searching()
             if self._serial_manager.is_acquiring:
                 self._stop_acquisition()
+            self._start_btn.disabled = True
+            
         self._config_view.update_connection_state(connected)
+        try:
+            self._start_btn.update()
+        except Exception:
+            pass
 
     def _on_ack_received(self, ack_frame):
         color = STATUS_OK if ack_frame.result == "OK" else STATUS_CRITICAL

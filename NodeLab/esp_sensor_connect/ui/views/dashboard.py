@@ -24,6 +24,7 @@ from ui.design_tokens import (
     SPACE_XS, SPACE_SM, SPACE_MD, SPACE_LG, SPACE_XL,
     kpi_card, section_card, styled_dropdown, shadow_card,
 )
+from ui.components.channel_widget import ChannelWidget
 
 
 class DashboardView(ft.Column):
@@ -64,14 +65,13 @@ class DashboardView(ft.Column):
             spacing=SPACE_MD,
         )
 
-        # ---- Selector de canal ----
-        self._value_index = 0
-        self._value_selector = styled_dropdown(
-            label="Canal",
-            value="0",
-            options=[ft.dropdown.Option(str(i), f"Canal {i}") for i in range(4)],
-            on_select=self._on_value_index_changed,
-            width=140,
+        # ---- Selector de canal y añadir widget ----
+        self._add_widget_btn = ft.ElevatedButton(
+            "Añadir Gráfico",
+            icon=ft.Icons.ADD_CHART_ROUNDED,
+            color=BG_DEEPEST,
+            bgcolor=ACCENT_PRIMARY,
+            on_click=self._open_add_dialog
         )
 
         # ---- Chart header ----
@@ -79,55 +79,45 @@ class DashboardView(ft.Column):
             controls=[
                 ft.Column(
                     controls=[
-                        ft.Text("SENSOR DATA", size=11, color=TEXT_TERTIARY,
+                        ft.Text("SENSOR DATA MULTI-CANAL", size=11, color=TEXT_TERTIARY,
                                 weight=ft.FontWeight.W_700, font_family=FONT_FAMILY),
-                        ft.Text("Ultimos 100 puntos por nodo", size=11,
+                        ft.Text("Visualización independiente por nodo y canal", size=11,
                                 color=TEXT_TERTIARY, font_family=FONT_FAMILY),
                     ],
                     spacing=2,
                 ),
                 ft.Container(expand=True),
-                self._value_selector,
+                self._add_widget_btn,
             ],
             vertical_alignment=ft.CrossAxisAlignment.END,
         )
 
-        # ---- Canvas para el grafico ----
-        self._chart_canvas = cv.Canvas(
-            on_resize=self._on_canvas_resize,
-            shapes=[],
+        # ---- Grid de Widgets ----
+        self._widgets = []
+        self._widget_grid = ft.GridView(
             expand=True,
+            runs_count=5,
+            max_extent=320,
+            child_aspect_ratio=1.5,
+            spacing=SPACE_MD,
+            run_spacing=SPACE_MD,
         )
-        self._canvas_width = 800.0
-        self._canvas_height = 350.0
-
-        chart_box = ft.Container(
-            content=self._chart_canvas,
-            bgcolor=BG_DEEPEST,
-            border_radius=RADIUS_MD,
-            border=ft.border.all(1, BORDER_SUBTLE),
-            padding=ft.Padding(SPACE_LG, SPACE_XL + 10, SPACE_LG + 30, SPACE_XL),
-            expand=True,
-        )
-
-        # ---- Leyenda ----
-        self._legend_row = ft.Row(controls=[], spacing=SPACE_MD, wrap=True)
 
         # ---- Empty state ----
         self._no_data_overlay = ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Container(
-                        content=ft.Icon(ft.Icons.INSIGHTS_ROUNDED, size=40,
+                        content=ft.Icon(ft.Icons.DASHBOARD_CUSTOMIZE_ROUNDED, size=40,
                                         color=TEXT_TERTIARY),
                         bgcolor=BG_SURFACE_2,
                         border_radius=RADIUS_LG,
                         padding=SPACE_LG,
                         width=72, height=72,
                     ),
-                    ft.Text("Esperando datos...", size=15, color=TEXT_SECONDARY,
+                    ft.Text("No hay widgets", size=15, color=TEXT_SECONDARY,
                             weight=ft.FontWeight.W_600, font_family=FONT_FAMILY),
-                    ft.Text("Conecta la Base Station y presiona START",
+                    ft.Text("Usa 'Añadir Gráfico' para ver datos",
                             size=12, color=TEXT_TERTIARY, font_family=FONT_FAMILY),
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -142,9 +132,8 @@ class DashboardView(ft.Column):
         chart_section = section_card(
             content=ft.Column(
                 controls=[chart_header,
-                          ft.Stack(controls=[chart_box, self._no_data_overlay],
-                                   expand=True),
-                          self._legend_row],
+                          ft.Stack(controls=[self._widget_grid, self._no_data_overlay],
+                                   expand=True)],
                 spacing=SPACE_MD,
                 expand=True,
             ),
@@ -155,6 +144,75 @@ class DashboardView(ft.Column):
         self.controls = [kpi_row, chart_section]
         self.spacing = SPACE_MD
         self.expand = True
+
+    # ============================================================
+    # Add Widget Dialog
+    # ============================================================
+
+    def _open_add_dialog(self, e):
+        node_ids = self._serial_manager.get_all_node_ids()
+        if not node_ids:
+            # Fallback if no nodes, allow 0-10 for testing
+            node_ids = list(range(1, 11))
+            
+        node_dropdown = styled_dropdown(
+            label="Nodo",
+            value=str(node_ids[0]) if node_ids else "1",
+            options=[ft.dropdown.Option(str(n), f"Nodo {n}") for n in node_ids]
+        )
+        
+        channel_dropdown = styled_dropdown(
+            label="Canal",
+            value="0",
+            options=[ft.dropdown.Option(str(i), f"Canal {i}") for i in range(4)]
+        )
+        
+        def close_dlg(e):
+            dlg.open = False
+            self._page.update()
+
+        def add_and_close(e):
+            nid = int(node_dropdown.value)
+            cid = int(channel_dropdown.value)
+            self._add_widget(nid, cid)
+            dlg.open = False
+            self._page.update()
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Añadir Widget de Canal"),
+            content=ft.Column([node_dropdown, channel_dropdown], tight=True, spacing=SPACE_MD),
+            actions=[
+                ft.TextButton("Cancelar", on_click=close_dlg),
+                ft.ElevatedButton("Añadir", on_click=add_and_close, color=BG_DEEPEST, bgcolor=ACCENT_PRIMARY),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        
+        self._page.dialog = dlg
+        dlg.open = True
+        self._page.update()
+
+    def _add_widget(self, node_id: int, channel_id: int):
+        color = NODE_PALETTE[node_id % len(NODE_PALETTE)]
+        w = ChannelWidget(node_id, channel_id, color, self._remove_widget)
+        self._widgets.append(w)
+        self._widget_grid.controls.append(w)
+        
+        self._no_data_overlay.visible = False
+        self._safe_update(self._no_data_overlay)
+        self._safe_update(self._widget_grid)
+        
+    def _remove_widget(self, widget: ChannelWidget):
+        if widget in self._widgets:
+            self._widgets.remove(widget)
+        if widget in self._widget_grid.controls:
+            self._widget_grid.controls.remove(widget)
+            
+        if not self._widgets:
+            self._no_data_overlay.visible = True
+            
+        self._safe_update(self._no_data_overlay)
+        self._safe_update(self._widget_grid)
 
     # ============================================================
     # KPI helpers
@@ -194,14 +252,6 @@ class DashboardView(ft.Column):
             shadow=shadow_card(),
             expand=True,
         )
-
-    # ============================================================
-    # Canvas callback
-    # ============================================================
-
-    def _on_canvas_resize(self, e: cv.CanvasResizeEvent):
-        self._canvas_width = e.width
-        self._canvas_height = e.height
 
     # ============================================================
     # Activacion / desactivacion
@@ -282,186 +332,12 @@ class DashboardView(ft.Column):
         self._safe_update(self._kpi_uptime)
 
     def _update_chart(self):
-        node_ids = self._serial_manager.get_all_node_ids()
-
-        if not node_ids:
-            if not self._no_data_overlay.visible:
-                self._no_data_overlay.visible = True
-                self._safe_update(self._no_data_overlay)
+        if not self._widgets:
             return
 
-        # Recopilar datos
-        all_node_data = {}
-        all_flat = []
-        for nid in node_ids:
-            vals = self._serial_manager.get_node_data(nid, self._value_index, self.MAX_CHART_POINTS)
-            if not vals:
-                continue
-
-            all_node_data[nid] = vals
-            all_flat.extend(vals)
-
-        if not all_flat:
-            if not self._no_data_overlay.visible:
-                self._no_data_overlay.visible = True
-                self._safe_update(self._no_data_overlay)
-            return
-
-        # Ocultar overlay si tenemos datos
-        if self._no_data_overlay.visible:
-            self._no_data_overlay.visible = False
-            self._safe_update(self._no_data_overlay)
-
-        # Rangos - auto-escalado estable
-        y_min = min(all_flat)
-        y_max = max(all_flat)
-        rng = y_max - y_min
-        
-        # Rango mínimo para que no salte locamente con ruido
-        if rng < 50.0:
-            mid = (y_max + y_min) / 2.0
-            y_min = mid - 25.0
-            y_max = mid + 25.0
-            rng = 50.0
-            
-        margin = rng * 0.15
-        self._y_min = y_min - margin
-        self._y_max = y_max + margin
-
-        w = self._canvas_width
-        h = self._canvas_height
-        if w <= 0 or h <= 0:
-            return
-
-        shapes = []
-
-        # Grid horizontal
-        for i in range(6):
-            gy = h - (i / 5) * h
-            yv = self._y_min + (i / 5) * (self._y_max - self._y_min)
-            shapes.append(cv.Line(
-                x1=0, y1=gy, x2=w, y2=gy,
-                paint=ft.Paint(color=ft.Colors.with_opacity(0.06, "#FFFFFF"),
-                               stroke_width=1),
-            ))
-            shapes.append(cv.Text(
-                x=-48, y=gy - 6,
-                value=f"{yv:.1f}",
-                style=ft.TextStyle(size=9, color=TEXT_TERTIARY,
-                                   font_family=FONT_MONO),
-            ))
-
-        # Grid vertical
-        for xl in [0, 25, 50, 75, 100]:
-            gx = (xl / self.MAX_CHART_POINTS) * w
-            shapes.append(cv.Line(
-                x1=gx, y1=0, x2=gx, y2=h,
-                paint=ft.Paint(color=ft.Colors.with_opacity(0.04, "#FFFFFF"),
-                               stroke_width=1),
-            ))
-            shapes.append(cv.Text(
-                x=gx - 6, y=h + 6,
-                value=str(xl),
-                style=ft.TextStyle(size=9, color=TEXT_TERTIARY,
-                                   font_family=FONT_MONO),
-            ))
-
-        # Lineas de datos
-        legend_items = []
-        for nid, vals in all_node_data.items():
-            color = NODE_PALETTE[nid % len(NODE_PALETTE)]
-            # Si el nodo está caído, hacerlo semi-transparente
-            if not self._serial_manager.is_node_healthy(nid):
-                color = ft.Colors.with_opacity(0.3, color)
-
-            n = len(vals)
-            if n < 2:
-                continue
-
-            path_els = []
-            for i, v in enumerate(vals):
-                px = (i / max(self.MAX_CHART_POINTS - 1, 1)) * w
-                py = h - ((v - self._y_min) /
-                           max(self._y_max - self._y_min, 0.01)) * h
-                py = max(0, min(h, py))
-                if i == 0:
-                    path_els.append(cv.Path.MoveTo(px, py))
-                else:
-                    path_els.append(cv.Path.LineTo(px, py))
-
-            # Sombra exterior sutil para efecto glow
-            shapes.append(cv.Path(
-                path_els,
-                paint=ft.Paint(color=ft.Colors.with_opacity(0.3, color), stroke_width=6,
-                               style=ft.PaintingStyle.STROKE,
-                               anti_alias=True),
-            ))
-            # Linea principal
-            shapes.append(cv.Path(
-                path_els,
-                paint=ft.Paint(color=color, stroke_width=2.5,
-                               style=ft.PaintingStyle.STROKE,
-                               anti_alias=True),
-            ))
-
-            # Ultimo punto con doble halo
-            last_px = ((n - 1) / max(self.MAX_CHART_POINTS - 1, 1)) * w
-            last_py = h - ((vals[-1] - self._y_min) /
-                            max(self._y_max - self._y_min, 0.01)) * h
-            last_py = max(0, min(h, last_py))
-
-            shapes.append(cv.Circle(
-                x=last_px, y=last_py, radius=6,
-                paint=ft.Paint(color=ft.Colors.with_opacity(0.2, color),
-                               style=ft.PaintingStyle.FILL),
-            ))
-            shapes.append(cv.Circle(
-                x=last_px, y=last_py, radius=3.5,
-                paint=ft.Paint(color=color, style=ft.PaintingStyle.FILL),
-            ))
-
-            legend_items.append(self._legend_chip(f"Nodo {nid}", color))
-
-        # Frame del chart
-        shapes.append(cv.Rect(
-            x=0, y=0, width=w, height=h,
-            paint=ft.Paint(color=BORDER_SUBTLE, stroke_width=1,
-                           style=ft.PaintingStyle.STROKE),
-        ))
-
-        self._chart_canvas.shapes = shapes
-        self._safe_update(self._chart_canvas)
-
-        self._legend_row.controls = legend_items
-        self._safe_update(self._legend_row)
-
-    # ============================================================
-    # Helpers
-    # ============================================================
-
-    def _legend_chip(self, label, color) -> ft.Container:
-        return ft.Container(
-            content=ft.Row(
-                controls=[
-                    ft.Container(width=8, height=8, border_radius=4,
-                                 bgcolor=color,
-                                 shadow=ft.BoxShadow(spread_radius=0,
-                                     blur_radius=6,
-                                     color=ft.Colors.with_opacity(0.4, color))),
-                    ft.Text(label, size=11, color=TEXT_SECONDARY,
-                            font_family=FONT_FAMILY, weight=ft.FontWeight.W_500),
-                ],
-                spacing=6,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            bgcolor=BG_SURFACE_2,
-            border=ft.border.all(1, BORDER_DEFAULT),
-            border_radius=RADIUS_SM,
-            padding=ft.Padding(SPACE_XS, SPACE_SM, SPACE_XS, SPACE_SM),
-        )
-
-    def _on_value_index_changed(self, e):
-        self._value_index = int(e.control.value)
+        for w in self._widgets:
+            vals = self._serial_manager.get_node_data(w.node_id, w.channel_id, count=ChannelWidget.MAX_POINTS)
+            w.update_data(vals)
 
     def _safe_update(self, control):
         try:
