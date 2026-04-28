@@ -1,9 +1,10 @@
 """
-protocol_parser.py - Deserializador de tramas del Gateway TDMA v4
+protocol_parser.py - Deserializador de tramas del Gateway TDMA v5
 =====================================================================
 
-Interpreta las tramas CSV recibidas por el puerto serie desde la
-Base Station (Comunicacion_ESPNOW). Formato del firmware v4.
+Interpreta las tramas binarias COBS y ASCII recibidas por el puerto
+serie desde la Base Station (Comunicacion_ESPNOW). Formato del
+firmware v5.
 
 Tramas soportadas:
   DATA      : DATA,node_id,ch_id,seq,encoding,first_idx,count,val1,...
@@ -181,7 +182,7 @@ ParsedFrame = Union[
 # ============================================================
 
 class ProtocolParser:
-    """Parser de protocolo para tramas del Gateway TDMA v4."""
+    """Parser de protocolo para tramas del Gateway TDMA v5 (binario COBS + ASCII)."""
 
     def __init__(self):
         self._in_stats_block = False
@@ -203,12 +204,13 @@ class ProtocolParser:
                 return None
                 
         elif msg_type == 0x02: # SER_MSG_DATA
-            if len(payload) < 14:
+            if len(payload) < 16:
                 return None
             # uint8 type, version, node_id, channel_id, encoding, reserved
             # uint16 sequence_id, sample_count
             # uint32 first_sample_index
-            header = struct.unpack('<BBBBBBHHI', payload[:14])
+            # uint16 crc16 (v5)
+            header = struct.unpack('<BBBBBBHHIH', payload[:16])
             
             node_id = header[2]
             channel_id = header[3]
@@ -216,8 +218,9 @@ class ProtocolParser:
             sequence = header[6]
             sample_count = header[7]
             first_idx = header[8]
+            # header[9] = crc16 (validated by gateway, ignored here)
             
-            samples_data = payload[14:]
+            samples_data = payload[16:]
             values = []
             if encoding == 2: # FLOAT32
                 if len(samples_data) >= sample_count * 4:
@@ -239,12 +242,13 @@ class ProtocolParser:
             return DataFrame(node_id, channel_id, sequence, encoding, first_idx, sample_count, values)
             
         elif msg_type == 0x03: # SER_MSG_TIMING
-            if len(payload) < 24:
+            if len(payload) < 26:
                 return None
-            # uint8 type, version, node_id, channel_id
-            # uint32 sample_rate, dt_us
-            # uint64 t0_epoch
-            # uint32 t0_sample_idx
+            # uint8  type, version, node_id, channel_id
+            # uint32 sample_rate_hz, dt_us
+            # uint64 t0_epoch_ms
+            # uint32 t0_sample_index
+            # uint16 crc16  (v5 — validated by gateway, ignored here)
             header = struct.unpack('<BBBBIIQI', payload[:24])
             return TimingFrame(
                 node_id=header[2],

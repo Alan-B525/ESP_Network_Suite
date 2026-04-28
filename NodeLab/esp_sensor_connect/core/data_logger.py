@@ -103,9 +103,10 @@ class DataLogger:
             f.write(f"Fecha de inicio: {datetime.now().isoformat()}\n")
             f.write(f"Directorio: {self.session_path.absolute()}\n")
 
-        # Resetear contadores
+        # Resetear contadores y estado de sesión
         self.total_records = 0
         self._csv_files = {}
+        self._timing_info = {}   # Limpiar metadata de tiempo de sesiones anteriores
         self._last_flush_time = time.time()
 
         # Iniciar hilo de escritura

@@ -1,15 +1,18 @@
 // ============================================================
-// Base Station (Gateway) — Protocolo TDMA v4 / ESP-NOW
+// Base Station (Gateway) — Protocolo TDMA v5 / ESP-NOW
 // ============================================================
 //
 // Coordina red de hasta 10 nodos ESP32 con hasta 4 canales cada uno.
 //
-// Funcionalidades v4:
+// Funcionalidades v5:
 //   - Estados: DISCOVERY → IDLE → ACQUIRING (controlado por PC)
 //   - TDMA Round-Robin: 10 slots fijos, sin tiempos muertos
-//   - Reenvío de TIMING_INFO y DATA al PC vía serial
+//   - Reenvío de TIMING_INFO y DATA al PC vía serial (COBS binario)
 //   - Sincronización RTC: PC → Gateway → Beacon → Nodos
-//   - Comandos serial: CMD_START, CMD_STOP, CMD_SET_TIME
+//   - Comandos serial: CMD_START, CMD_STOP, CMD_SET_TIME, CMD_SET_RATE
+//   - CRC-16 CCITT en DATA y TIMING para integridad
+//   - Auto-ID: asignación dinámica de node_id vía PKT_JOIN_ACK
+//   - Telemetría: reenvío de PKT_NODE_TELEMETRY al PC
 // ============================================================
 
 #include <Arduino.h>
@@ -526,12 +529,12 @@ private:
     void emitDataBinary(const ActiveNodeEntry &node,
                      const DataPacketHeader &header,
                      const uint8_t *payload) {
-        size_t payload_len = header.sample_count * sampleSizeBytes(header.sample_encoding);
-        size_t total_len = DATA_HEADER_SIZE + payload_len;
+        size_t total_len = dataPacketExpectedLength(header);
+        if (total_len == 0 || total_len < DATA_HEADER_SIZE) return;
         
         uint8_t msg_buf[total_len];
         memcpy(msg_buf, &header, DATA_HEADER_SIZE);
-        memcpy(msg_buf + DATA_HEADER_SIZE, payload, payload_len);
+        memcpy(msg_buf + DATA_HEADER_SIZE, payload, total_len - DATA_HEADER_SIZE);
         
         sendBinaryMsg(SER_MSG_DATA, msg_buf, total_len);
     }
@@ -716,7 +719,7 @@ private:
     // ============================================================
 
     void printStartupInfo() {
-        sendAsciiMsg("BOOT,ESP32C3_TDMA_GATEWAY_V4");
+        sendAsciiMsg("BOOT,ESP32C3_TDMA_GATEWAY_V5");
         sendAsciiMsg("BOOT,MAC,%s", WiFi.macAddress().c_str());
         sendAsciiMsg("BOOT,CHANNEL,%d", WIFI_CHANNEL);
         sendAsciiMsg("BOOT,CYCLE_MS,%u", CYCLE_MS);

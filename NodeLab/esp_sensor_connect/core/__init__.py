@@ -3,7 +3,7 @@
 # ============================================================
 # Este paquete contiene toda la logica de negocio separada de la UI:
 #   - serial_manager: Comunicacion serie en hilo dedicado
-#   - protocol_parser: Deserializacion de tramas del Gateway TDMA v4
+#   - protocol_parser: Deserializacion de tramas del Gateway TDMA v5
 #   - data_logger: Persistencia robusta de datos a CSV
 # ============================================================
 

@@ -188,7 +188,7 @@ class DashboardView(ft.Column):
             actions_alignment=ft.MainAxisAlignment.END,
         )
         
-        self._page.dialog = dlg
+        self._page.overlay.append(dlg)
         dlg.open = True
         self._page.update()
 

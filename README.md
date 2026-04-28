@@ -1,6 +1,6 @@
 # ESP Network Suite
 
-Sistema de adquisición de datos inalámbrico basado en **ESP-NOW** con protocolo **TDMA v4** para redes de sensores ESP32.
+Sistema de adquisición de datos inalámbrico basado en **ESP-NOW** con protocolo **TDMA v5** para redes de sensores ESP32.
 
 ```
   ┌──────────────┐    ESP-NOW     ┌──────────────────┐    USB/Serial    ┌──────────────┐
@@ -17,7 +17,7 @@ Sistema de adquisición de datos inalámbrico basado en **ESP-NOW** con protocol
 ```
 ESP_Network_Suite/
 ├── shared/                          # ← Código compartido entre firmware
-│   └── tdma_protocol.h              #    Header CANÓNICO del protocolo v4
+│   └── tdma_protocol.h              #    Header CANÓNICO del protocolo v5
 │
 ├── Comunicacion_ESPNOW/             # ← Base Station (Gateway)
 │   ├── src/main.cpp                 #    Firmware C++ (PlatformIO)
@@ -35,7 +35,7 @@ ESP_Network_Suite/
 │   └── esp_sensor_connect/
 │       ├── main.py                  #    Punto de entrada (Flet UI)
 │       ├── core/                    #    Serial, parser, logger
-│       │   ├── protocol_parser.py   #    Deserializa tramas del gateway
+│       │   ├── protocol_parser.py   #    Deserializa tramas binarias COBS
 │       │   ├── serial_manager.py    #    Conexión USB + hilo de lectura
 │       │   └── data_logger.py       #    Persistencia CSV por nodo+canal
 │       └── ui/                      #    Interfaz gráfica
@@ -44,6 +44,10 @@ ESP_Network_Suite/
 │           ├── components/
 │           └── views/
 │
+├── docs/                            # ← Documentación de migración
+│   ├── PROTOCOL_v5_MIGRATION.md     #    Cambios v4 → v5
+│   └── SYSTEM_EVOLUTION_v5.md       #    Evolución del sistema
+│
 ├── SYSTEM_ARCHITECTURE.md           # ← Contratos de datos entre componentes
 ├── README.md                        # ← Este archivo
 └── .gitignore
@@ -51,11 +55,11 @@ ESP_Network_Suite/
 
 ---
 
-## Protocolo TDMA v4
+## Protocolo TDMA v5
 
 | Parámetro | Valor |
 |---|---|
-| Versión | **4** |
+| Versión | **5** |
 | Max Nodos | 10 |
 | Max Canales/Nodo | 4 |
 | Ciclo TDMA | 1000 ms |
@@ -65,28 +69,52 @@ ESP_Network_Suite/
 | Guard Time | 200 µs |
 | Timeout Inactividad | 10000 ms |
 | Rate Configurable | 1–10000 Hz (default 1000 Hz) |
-| Encoding Soportado | INT16, FLOAT32 |
+| Encoding Soportado | INT16, FLOAT32, DELTA_8BIT |
+| Integridad | CRC-16 CCITT en DATA y TIMING |
+| ID de Nodos | Auto-asignado por Gateway (Plug & Play) |
+| Transporte Serial | COBS binario con delimitador 0x00 |
+
+### Novedades v5 (respecto a v4)
+
+- **CRC-16 CCITT** en `DataPacketHeader` y `TimingInfoPacket` para integridad de datos
+- **Auto-ID (Plug & Play)**: Los nodos arrancan con `node_id = 0` y el gateway les asigna un ID único vía `PKT_JOIN_ACK`
+- **Telemetría de Nodos** (`PKT_NODE_TELEMETRY`): RSSI, batería, temperatura, uso de buffer, errores TX, uptime
+- **Compresión Delta-8bit** (`SAMPLE_DELTA_8BIT`): Selección automática para reducir ancho de banda
+- **Comunicación serial COBS**: Encoding binario eficiente para DATA y TIMING de alto throughput
 
 ### Tipos de Paquete (over-the-air)
 
 | Tipo | Código | Dirección | Tamaño | Descripción |
 |---|---|---|---|---|
-| `PKT_BEACON_SYNC` | `0x11` | Gateway → Broadcast | **78B** | Sincronización + schedule + RTC + rate |
+| `PKT_BEACON_SYNC` | `0x11` | Gateway → Broadcast | **80B** | Sincronización + schedule + RTC + rate |
 | `PKT_NODE_HELLO` | `0x12` | Nodo → Gateway | 8B | Registro con capabilities |
-| `PKT_DATA` | `0x13` | Nodo → Gateway | 14B+ | Datos de un canal (lossless) |
+| `PKT_DATA` | `0x13` | Nodo → Gateway | **16B**+ | Datos de un canal (lossless, con CRC) |
 | `PKT_DIRECT_ACK` | `0x14` | Gateway → Nodo | 10B | Confirmación de recepción |
-| `PKT_TIMING_INFO` | `0x15` | Nodo → Gateway | 24B | Sincronización temporal t0+dt |
+| `PKT_TIMING_INFO` | `0x15` | Nodo → Gateway | **26B** | Sincronización temporal t0+dt (con CRC) |
+| `PKT_NODE_TELEMETRY` | `0x16` | Nodo → Gateway | 16B | Diagnóstico de salud del nodo |
+| `PKT_JOIN_ACK` | `0x17` | Gateway → Nodo | 4B | Asignación de ID al nodo |
 
-### Formato Serial (Gateway → PC)
+### Formato Serial Binario (Gateway → PC)
+
+La comunicación serial usa **COBS encoding** con `0x00` como delimitador. Cada frame contiene un byte de tipo:
+
+| Tipo | Código | Contenido |
+|---|---|---|
+| `SER_MSG_ASCII` | `0x01` | Texto UTF-8 (eventos, stats, logs) |
+| `SER_MSG_DATA` | `0x02` | DataPacketHeader binario + samples |
+| `SER_MSG_TIMING` | `0x03` | TimingInfoPacket binario (26B) |
+
+### Mensajes ASCII (dentro de SER_MSG_ASCII)
 
 ```
 DATA,{node_id},{ch_id},{seq},{encoding},{first_idx},{count},{val1},{val2},...
-TIMING,{node_id},{ch_id},{rate_hz},{dt_us},{t0_epoch_ms},{t0_sample_idx}
+TIMING,{node_id},{ch_id},{sample_rate_hz},{dt_us},{t0_epoch_ms},{t0_sample_idx}
 BEACON,{seq},STATE={s},NODES={n},SLOT_US={us},RATE={hz},RTC={ms},SCHED={id;...},ACKS={id:seq;...}
 HELLO,{node_id},{mac},CH={mask},RATE={hz}
 ACK,{command},{result}
 NODE_JOIN,{node_id},{mac}
 NODE_TIMEOUT,{node_id},{mac}
+TELEMETRY,{node_id},{rssi},{battery},{temp},{buf},{ovf},{tx_err},{uptime}
 LOSS,{node_id},EXPECTED={x},GOT={y}
 BOOT,{key}[,{value}]
 WARN,{type},{detail}
@@ -117,9 +145,11 @@ pio device monitor         # Monitor serial (921600 baud)
 
 ### 2. Compilar Nodo(s)
 
-Editar `Sender_ESPNOW/src/main.cpp`:
+Los nodos usan **Auto-ID** (Plug & Play). No necesitas configurar el `NODE_ID` manualmente.
+Solo necesitas ajustar la MAC de tu gateway:
+
 ```cpp
-#define NODE_ID 1  // Cambiar para cada nodo (1-10)
+// En Sender_ESPNOW/src/main.cpp:
 #define BASESTATION_MAC {0xB8, 0xF8, 0x62, 0x04, 0x5F, 0x98}  // MAC de tu gateway
 ```
 
@@ -180,5 +210,5 @@ Si cambias el protocolo:
 ---
 
 **Última actualización**: Abril 2026
-**Protocolo**: v4
+**Protocolo**: v5
 **Estado**: Desarrollo activo

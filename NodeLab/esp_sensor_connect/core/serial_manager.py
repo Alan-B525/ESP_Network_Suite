@@ -2,7 +2,7 @@
 serial_manager.py - Gestor de comunicacion serie en hilo separado
 =================================================================
 
-Maneja la conexion USB con la Base Station ESP32 (Gateway TDMA v3).
+Maneja la conexion USB con la Base Station ESP32 (Gateway TDMA v5).
 
 ARQUITECTURA CLAVE:
   La lectura del puerto serie se ejecuta en un Thread dedicado (daemon)
@@ -55,7 +55,7 @@ class SerialManager:
 
     # Baudrates comunes para comunicacion con ESP32
     BAUDRATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
-    DEFAULT_BAUDRATE = 921600  # Coincide con el gateway TDMA v3
+    DEFAULT_BAUDRATE = 921600  # Coincide con el gateway TDMA v5
 
     def __init__(self):
         # ---- Cola compartida para el DataLogger ----
@@ -111,6 +111,7 @@ class SerialManager:
         self._manager_running = True
         self._auto_connect_cooldown: float = 0.0  # Timestamp hasta cuando NO intentar auto-connect
         self._last_failed_port: str = ""  # Puerto que falló recientemente
+        self._basestation_verified: bool = False  # Se confirma al recibir cualquier trama válida
         
         self._auto_connect_thread = threading.Thread(target=self._auto_connect_loop, daemon=True)
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
@@ -312,9 +313,17 @@ class SerialManager:
         """
         Inicia la adquisicion de datos.
 
-        Gateway TDMA v4: envía CMD_START al Base Station para que
+        Gateway TDMA v5: envía CMD_START al Base Station para que
         los nodos cambien a estado ACQUIRING y empiecen a transmitir.
         """
+        # Reset watchdog timestamps so stale timings from the previous session
+        # don't cause the watchdog to fire immediately on the new session.
+        now = time.time()
+        with self._lock:
+            for node_id in list(self._node_health.keys()):
+                self._last_data_time[node_id] = now
+                self._node_health[node_id] = True
+
         if not self.send_command("CMD_START"):
             print("[SERIAL] Error al enviar CMD_START")
             return False

@@ -1,5 +1,5 @@
 // ============================================================
-// Nodo remoto ESP32-C3 — Protocolo TDMA v4 / ESP-NOW
+// Nodo remoto ESP32-C3 — Protocolo TDMA v5 / ESP-NOW
 // ============================================================
 //
 // Sistema LOSSLESS de adquisición multicanal:
@@ -575,7 +575,7 @@ void setup() {
     delay(100);
     esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-    Serial.printf("\n=== Nodo ESP32-C3 TDMA/ESP-NOW v4 LOSSLESS ===\n");
+    Serial.printf("\n=== Nodo ESP32-C3 TDMA/ESP-NOW v5 LOSSLESS ===\n");
     Serial.printf("NODE: ch=%u rate=%lu Hz ring=%u\n",
                   NUM_CHANNELS,
                   (unsigned long)current_rate_hz, SAMPLE_RING_CAPACITY);
