@@ -11,7 +11,7 @@ import json
 import os
 import flet as ft
 
-from core.serial_manager import SerialManager
+from core.network_manager import NetworkManager
 from ui.design_tokens import (
     FONT_FAMILY, FONT_MONO,
     BG_DEEPEST, BG_SURFACE_0, BG_SURFACE_1, BG_SURFACE_2,
@@ -29,13 +29,13 @@ from ui.design_tokens import (
 class ConfigView(ft.Column):
     """Vista de configuracion con secciones estilizadas y terminal."""
 
-    def __init__(self, serial_manager: SerialManager, page: ft.Page):
+    def __init__(self, serial_manager: NetworkManager, page: ft.Page):
         super().__init__()
 
         self._serial_manager = serial_manager
         self._page = page
         self._selected_port = ""
-        self._selected_baudrate = str(SerialManager.DEFAULT_BAUDRATE)
+        self._selected_baudrate = str(NetworkManager.DEFAULT_BAUDRATE)
         self._tdma_freq = "100"
         self._tdma_slot = "10"
         self._tdma_max_nodes = "10"
@@ -71,7 +71,7 @@ class ConfigView(ft.Column):
             label="Baudrate",
             value=self._selected_baudrate,
             options=[ft.dropdown.Option(str(b), f"{b:,} baud")
-                     for b in SerialManager.BAUDRATES],
+                     for b in NetworkManager.BAUDRATES],
             on_select=self._on_baudrate_selected,
             width=180,
         )
@@ -336,7 +336,7 @@ class ConfigView(ft.Column):
     # ============================================================
 
     def _refresh_ports(self):
-        ports = SerialManager.list_available_ports()
+        ports = NetworkManager.list_available_ports()
         self._port_dropdown.options = [
             ft.dropdown.Option(p["device"],
                                f'{p["device"]} - {p["description"]}')
@@ -533,7 +533,7 @@ class ConfigView(ft.Column):
                 with open(self._config_file, "r") as f:
                     cfg = json.load(f)
                     self._selected_port = cfg.get("port", "")
-                    self._selected_baudrate = cfg.get("baudrate", str(SerialManager.DEFAULT_BAUDRATE))
+                    self._selected_baudrate = cfg.get("baudrate", str(NetworkManager.DEFAULT_BAUDRATE))
                     self._tdma_freq = cfg.get("tdma_freq", "100")
                     self._tdma_slot = cfg.get("tdma_slot", "10")
                     self._tdma_max_nodes = cfg.get("tdma_max_nodes", "10")

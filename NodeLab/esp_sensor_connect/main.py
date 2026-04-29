@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import flet as ft
 
-from core.serial_manager import SerialManager
+from core.network_manager import NetworkManager
 from core.data_logger import DataLogger
 from ui.main_window import MainWindow
 from ui.design_tokens import (
@@ -91,7 +91,7 @@ def main(page: ft.Page):
     # Inicializacion del Core
     # ============================================================
 
-    serial_manager = SerialManager()
+    serial_manager = NetworkManager()
 
     data_logger = DataLogger(
         data_queue=serial_manager.data_queue,

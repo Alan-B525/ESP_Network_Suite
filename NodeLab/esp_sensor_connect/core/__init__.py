@@ -12,7 +12,7 @@ from core.protocol_parser import (
     JoinFrame, TimeoutFrame, LossFrame, StatsFrame, BootFrame, WarnFrame,
     AckFrame,
 )
-from core.serial_manager import SerialManager
+from core.network_manager import NetworkManager
 from core.data_logger import DataLogger
 
 __all__ = [
@@ -28,6 +28,6 @@ __all__ = [
     "BootFrame",
     "WarnFrame",
     "AckFrame",
-    "SerialManager",
+    "NetworkManager",
     "DataLogger",
 ]

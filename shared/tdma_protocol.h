@@ -54,7 +54,7 @@ constexpr uint8_t ESPNOW_MAX_PAYLOAD_BYTES = 250;
 // ---- Timing TDMA ----
 constexpr uint16_t CYCLE_MS = 1000;
 constexpr uint16_t REGISTRATION_WINDOW_MS = 100;
-constexpr uint16_t SLOT_GUARD_US = 200;
+constexpr uint16_t SLOT_GUARD_US = 500;
 
 // Slot fijo: (cycle - reg_window) / MAX_SLOTS
 // = (1000000 - 100000) / 10 = 90000 µs = 90 ms

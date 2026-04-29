@@ -7,7 +7,7 @@ Sistema de adquisición de datos inalámbrico basado en **ESP-NOW** con protocol
   │  Nodo ESP32  │───────────────▶│   Base Station    │────────────────▶│   NodeLab    │
   │ (Sensor x N) │    2.4 GHz    │  (Gateway ESP32)  │    921600 baud  │  (PC / Flet) │
   └──────────────┘               └──────────────────┘                  └──────────────┘
-   Sender_ESPNOW               Comunicacion_ESPNOW                       NodeLab/
+   Nodes                       BaseStation                       NodeLab/
 ```
 
 ---
@@ -19,30 +19,29 @@ ESP_Network_Suite/
 ├── shared/                          # ← Código compartido entre firmware
 │   └── tdma_protocol.h              #    Header CANÓNICO del protocolo v5
 │
-├── Comunicacion_ESPNOW/             # ← Base Station (Gateway)
-│   ├── src/main.cpp                 #    Firmware C++ (PlatformIO)
-│   ├── lib/tdma_protocol.h          #    Redirect → shared/
-│   ├── include/tdma_protocol.h      #    Redirect → lib/
-│   └── platformio.ini               #    ESP32-C3 DevKit-M1, 921600 baud
+├── BaseStation/                     # ← Base Station (Gateway)
+│   ├── include/                     #    Modular Headers (GatewayApp, TDMAManager...)
+│   ├── src/                         #    Implementation (GatewayApp.cpp, main.cpp...)
+│   └── platformio.ini               #    ESP32-C3 DevKit-M1, 921600 baud, shared/ path
 │
-├── Sender_ESPNOW/                   # ← Nodos Remotos
-│   ├── src/main.cpp                 #    Firmware C++ (PlatformIO)
-│   ├── lib/tdma_protocol.h          #    Redirect → shared/
-│   ├── include/tdma_protocol.h      #    Redirect → lib/
-│   └── platformio.ini               #    ESP32-C3, 115200 baud (debug)
+├── Nodes/                           # ← Nodos Remotos
+│   ├── include/                     #    Modular Headers (NodeApp, Acquisition...)
+│   ├── src/                         #    Implementation (NodeApp.cpp, main.cpp...)
+│   └── platformio.ini               #    ESP32-C3, 115200 baud (debug), shared/ path
 │
 ├── NodeLab/                         # ← Aplicación de Escritorio
 │   └── esp_sensor_connect/
 │       ├── main.py                  #    Punto de entrada (Flet UI)
-│       ├── core/                    #    Serial, parser, logger
-│       │   ├── protocol_parser.py   #    Deserializa tramas binarias COBS
-│       │   ├── serial_manager.py    #    Conexión USB + hilo de lectura
+│       ├── core/                    #    Arquitectura de servicios desacoplados
+│       │   ├── network/             #    NetworkManager, SerialService, NetworkState...
+│       │   ├── protocol/            #    BinaryParser, AsciiParser, Frames...
+│       │   ├── protocol_parser.py   #    Fachada unificada del protocolo v5
 │       │   └── data_logger.py       #    Persistencia CSV por nodo+canal
-│       └── ui/                      #    Interfaz gráfica
-│           ├── main_window.py
-│           ├── design_tokens.py
-│           ├── components/
-│           └── views/
+│       └── ui/                      #    Interfaz gráfica modular
+│           ├── layout/              #    Sidebar, Header components
+│           ├── views/               #    Dashboard, Nodes, Config views
+│           ├── main_window.py       #    Orquestador de layout
+│           └── design_tokens.py     #    Sistema de diseño
 │
 ├── docs/                            # ← Documentación de migración
 │   ├── PROTOCOL_v5_MIGRATION.md     #    Cambios v4 → v5
@@ -137,7 +136,7 @@ CMD_SET_RATE,{hz}\n   → ACK,CMD_SET_RATE,{hz}
 ### 1. Compilar Base Station
 
 ```bash
-cd Comunicacion_ESPNOW
+cd BaseStation
 pio run                    # Compilar
 pio run -t upload          # Subir al ESP32-C3
 pio device monitor         # Monitor serial (921600 baud)
@@ -154,7 +153,7 @@ Solo necesitas ajustar la MAC de tu gateway:
 ```
 
 ```bash
-cd Sender_ESPNOW
+cd Nodes
 pio run                    # Compilar
 pio run -t upload          # Subir al ESP32-C3
 ```
@@ -178,8 +177,8 @@ python main.py
 Si cambias el protocolo:
 
 1. ✏️ **`shared/tdma_protocol.h`** — Modificar struct/constante
-2. ✏️ **`Comunicacion_ESPNOW/src/main.cpp`** — Actualizar gateway
-3. ✏️ **`Sender_ESPNOW/src/main.cpp`** — Actualizar nodo
+2. ✏️ **`BaseStation/src/main.cpp`** — Actualizar gateway
+3. ✏️ **`Nodes/src/main.cpp`** — Actualizar nodo
 4. ✏️ **`NodeLab/.../protocol_parser.py`** — Actualizar parser
 5. ✏️ **`SYSTEM_ARCHITECTURE.md`** — Actualizar documentación
 6. 🔨 **`pio run`** en ambos firmware — Verificar compilación

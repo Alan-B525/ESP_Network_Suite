@@ -9,7 +9,7 @@ y empty state mejorado.
 import asyncio
 import flet as ft
 
-from core.serial_manager import SerialManager
+from core.network_manager import NetworkManager
 from ui.components.node_card import NodeCard
 from ui.design_tokens import (
     FONT_FAMILY, FONT_MONO,
@@ -28,7 +28,7 @@ class NodesView(ft.Column):
 
     REFRESH_RATE = 0.5  # 2 FPS
 
-    def __init__(self, serial_manager: SerialManager, page: ft.Page):
+    def __init__(self, serial_manager: NetworkManager, page: ft.Page):
         super().__init__()
 
         self._serial_manager = serial_manager

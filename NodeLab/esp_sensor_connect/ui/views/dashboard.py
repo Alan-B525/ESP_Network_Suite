@@ -13,7 +13,7 @@ import time
 import flet as ft
 import flet.canvas as cv
 
-from core.serial_manager import SerialManager
+from core.network_manager import NetworkManager
 from ui.design_tokens import (
     FONT_FAMILY, FONT_MONO, NODE_PALETTE,
     BG_DEEPEST, BG_SURFACE_0, BG_SURFACE_1, BG_SURFACE_2,
@@ -33,7 +33,7 @@ class DashboardView(ft.Column):
     MAX_CHART_POINTS = 100
     REFRESH_RATE = 0.1  # 10 FPS
 
-    def __init__(self, serial_manager: SerialManager, page: ft.Page):
+    def __init__(self, serial_manager: NetworkManager, page: ft.Page):
         super().__init__()
 
         self._serial_manager = serial_manager

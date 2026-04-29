@@ -8,8 +8,8 @@
 ## 1. System Components
 
 ```
-  Sender_ESPNOW ──(ESP-NOW)──▶ Comunicacion_ESPNOW ──(USB Serial)──▶ NodeLab
-     (Nodes)                      (Base Station)                    (Desktop App)
+  Nodes ─────────(ESP-NOW)──▶ BaseStation ──(USB Serial)──▶ NodeLab
+     (Nodes)                      (BaseStation)                    (Desktop App)
      C++ / PlatformIO             C++ / PlatformIO                  Python / Flet
 ```
 
