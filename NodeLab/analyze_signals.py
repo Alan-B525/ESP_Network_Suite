@@ -6,11 +6,17 @@ ADC: 12-bit (0-4095), rango 0-3.3V
 """
 import csv
 import os
+import glob
 import numpy as np
 
-SESSION = r"C:\Users\Becario 4\Documents\PlatformIO\Projects\ESP_Network_Suite\NodeLab\esp_sensor_connect\data_sessions\2026-05-06_16-53-49"
+BASE_DIR = r"C:\Users\Becario 4\Documents\PlatformIO\Projects\ESP_Network_Suite\NodeLab\esp_sensor_connect\data_sessions"
+sessions = sorted(glob.glob(os.path.join(BASE_DIR, "*")), key=os.path.getmtime, reverse=True)
+SESSION = sessions[0]
+
 MV_TO_V = 1.0 / 1000.0
 SAMPLE_RATE = 1000  # Hz
+
+print(f"Analizando sesión: {os.path.basename(SESSION)}")
 
 def load_csv(filepath):
     """Load CSV, return arrays of sample_index and value."""
