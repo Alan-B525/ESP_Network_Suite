@@ -181,3 +181,32 @@ STATS_BEGIN / STATS,... / NODE,... / STATS_END
 8. **Auto-ID**: nodes start with id=0, gateway assigns via PKT_JOIN_ACK.
 9. **DataPacketHeader is 16 bytes** (includes CRC-16). Parser must unpack 16B, not 14B.
 10. **DELTA_8BIT payload** is variable: `2 + (count-1)` bytes, not `count * 1`.
+
+## 7. High-Fidelity Signal Synchronization & ADC Calibration
+
+To achieve sub-millisecond signal alignment and minimize voltage disparities across multiple identical ESP32-C3 nodes, the system implements specific hardware-level strategies.
+
+### Phase-Locked Sampling (Eliminating FreeRTOS Jitter)
+When a node receives the broadcast `PKT_BEACON_SYNC` starting an acquisition session, the callback is executed by the Wi-Fi task. Due to FreeRTOS scheduling, the execution time of this callback varies (jitter of up to 500µs).
+If a timer was blindly started inside the callback, the nodes would sample the signal at the correct frequency, but out of phase with each other.
+
+**Solution:**
+1. The hardware time `sync_anchor_us_` is captured at the very beginning of the ESP-NOW callback using `esp_timer_get_time()`.
+2. The acquisition logic computes the exact delay required to align the next sampling slot to a perfect mathematical grid: `delay = period - ((now - anchor) % period)`.
+3. An ultra-precise microsecond busy-wait (`ets_delay_us`) stalls the CPU until the exact boundary is reached.
+4. `esp_timer_start_periodic()` is then fired, ensuring all nodes sample their ADC inside the identical temporal microsecond window.
+
+### eFuse ADC Calibration (Eliminating Hardware Discrepancies)
+Standard `analogRead()` returns raw 12-bit ADC values (0-4095). Due to manufacturing tolerances in silicon, two ESP32 chips will produce different raw values for the exact same physical voltage, leading to apparent signal mismatch.
+
+**Solution:**
+- The firmware uses the native ESP32 calibration API (`analogReadMilliVolts()`).
+- This reads the **eFuse calibration curve** permanently burned into each chip at the Espressif factory.
+- The returned data is in true millivolts (mV). 
+- Values are transmitted as `int16_t` representing mV. The NodeLab Python desktop divides this by `1000.0` to display Volts.
+
+### Known Tolerances
+Even with Phase-Locked Sampling and eFuse calibration, there can be a residual discrepancy of **±50mV to ±100mV** between nodes (approx 3% error). This is caused by:
+- Non-linearities in the internal ADC (especially near 0V and 3.3V).
+- Micro-voltage drops on the PCB traces or breadboard wiring.
+- If absolute bit-to-bit precision is required, a two-point linear software calibration (`y = mx + b`) must be added to the NodeLab UI.
