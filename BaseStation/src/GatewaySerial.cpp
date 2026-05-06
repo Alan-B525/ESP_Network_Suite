@@ -4,6 +4,11 @@
 void GatewaySerial::begin(unsigned long baud) {
     Serial.setTxBufferSize(16384);
     Serial.begin(baud);
+    // Esperar hasta 2 segundos a que USB-CDC se conecte al host
+    uint32_t start = millis();
+    while (!Serial && (millis() - start) < 2000) {
+        delay(10);
+    }
 }
 
 void GatewaySerial::sendBinaryMsg(tdma::SerialMsgType type, const uint8_t *payload, size_t len) {

@@ -1,21 +1,24 @@
 import threading
 from typing import Dict, List
+from collections import deque
 
 class TelemetryBuffer:
     """
     Manages circular buffers of sensor data for UI visualization.
-    Implements downsampling/decimation logic to keep UI responsive.
+    
+    Stores actual sample values (not averages) for faithful signal reproduction.
+    Uses deque for efficient append/trim operations.
     """
-    def __init__(self, max_size: int = 200):
+    def __init__(self, max_size: int = 2000):
         self._lock = threading.Lock()
         self._max_size = max_size
-        # Structure: {node_id: {channel_id: [float, float, ...]}}
-        self._buffers: Dict[int, Dict[int, List[float]]] = {}
+        # Structure: {node_id: {channel_id: deque([float, ...])}}
+        self._buffers: Dict[int, Dict[int, deque]] = {}
 
     def append_samples(self, node_id: int, channel_id: int, values: List[float]):
         """
-        Appends a list of values to the buffer. 
-        Calculates average for decimation to keep the buffer size under control.
+        Appends ALL sample values to the buffer (no averaging).
+        This preserves the actual waveform for faithful visualization.
         """
         if not values:
             return
@@ -24,24 +27,19 @@ class TelemetryBuffer:
             if node_id not in self._buffers:
                 self._buffers[node_id] = {}
             if channel_id not in self._buffers[node_id]:
-                self._buffers[node_id][channel_id] = []
+                self._buffers[node_id][channel_id] = deque(maxlen=self._max_size)
 
-            # Decimation: for plotting purposes, we often only need a trend
-            # In the original code, it took the average of the packet
-            avg_val = sum(values) / len(values)
-            
-            node_buf = self._buffers[node_id][channel_id]
-            node_buf.append(avg_val)
+            buf = self._buffers[node_id][channel_id]
+            buf.extend(values)
 
-            if len(node_buf) > self._max_size:
-                # Keep only the last max_size elements
-                self._buffers[node_id][channel_id] = node_buf[-self._max_size:]
-
-    def get_data(self, node_id: int, channel_id: int, count: int = 100) -> List[float]:
+    def get_data(self, node_id: int, channel_id: int, count: int = 500) -> List[float]:
         with self._lock:
             node_channels = self._buffers.get(node_id, {})
-            buffer = node_channels.get(channel_id, [])
-            return list(buffer[-count:])
+            buffer = node_channels.get(channel_id, deque())
+            # Return the last 'count' elements
+            if len(buffer) <= count:
+                return list(buffer)
+            return list(buffer)[-count:]
 
     def clear(self):
         with self._lock:

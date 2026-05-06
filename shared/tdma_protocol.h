@@ -50,6 +50,7 @@ constexpr uint8_t MAX_CHANNELS_PER_NODE = 4;
 
 // ---- Límite físico ESP-NOW ----
 constexpr uint8_t ESPNOW_MAX_PAYLOAD_BYTES = 250;
+constexpr uint8_t RX_QUEUE_LEN = 32;             // Cola de recepción del gateway
 
 // ---- Timing TDMA ----
 constexpr uint16_t CYCLE_MS = 1000;

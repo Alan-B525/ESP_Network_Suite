@@ -3,6 +3,7 @@
 
 #include "Acquisition.h"
 #include "LosslessEngine.h"
+#include <esp_now.h>
 
 class NodeApp {
 public:

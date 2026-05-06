@@ -110,7 +110,13 @@ class AsciiParser:
     @staticmethod
     def _parse_ack(line: str) -> AckFrame:
         parts = line.split(",", 2)
-        return AckFrame(parts[1] if len(parts)>1 else "", int(parts[2]) if len(parts)>2 else 0)
+        command = parts[1] if len(parts) > 1 else ""
+        result_str = parts[2] if len(parts) > 2 else "0"
+        try:
+            result = int(result_str)
+        except ValueError:
+            result = 1 if result_str.upper() == "OK" else 0
+        return AckFrame(command, result)
 
     @staticmethod
     def _parse_boot(line: str) -> BootFrame:

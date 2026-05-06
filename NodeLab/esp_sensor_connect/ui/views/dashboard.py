@@ -336,7 +336,7 @@ class DashboardView(ft.Column):
             return
 
         for w in self._widgets:
-            vals = self._serial_manager.get_node_data(w.node_id, w.channel_id, count=ChannelWidget.MAX_POINTS)
+            vals = self._serial_manager.get_node_data(w.node_id, w.channel_id, count=500)
             w.update_data(vals)
 
     def _safe_update(self, control):

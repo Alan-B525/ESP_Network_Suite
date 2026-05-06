@@ -12,7 +12,7 @@ from ui.design_tokens import (
 class ChannelWidget(ft.Container):
     """Mini-widget para visualizar un nodo y un canal específico."""
     
-    MAX_POINTS = 100
+    MAX_POINTS = 500
     
     def __init__(self, node_id: int, channel_id: int, color: str, on_close):
         super().__init__()
@@ -75,8 +75,10 @@ class ChannelWidget(ft.Container):
     def update_data(self, values: list[float]):
         if not values:
             return
-            
-        self._val_text.value = f"{values[-1]:.2f}"
+        
+        # Values are now directly in millivolts from the ESP32 calibrated ADC
+        last_volts = values[-1] / 1000.0
+        self._val_text.value = f"{last_volts:.3f} V"
         
         w = 300.0  # approximate canvas width when in grid
         h = 100.0  # approximate canvas height

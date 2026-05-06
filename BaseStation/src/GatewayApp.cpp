@@ -60,7 +60,7 @@ void GatewayApp::onDataRecvStatic(const uint8_t *mac, const uint8_t *data, int l
 
 void GatewayApp::enqueueRxFrame(const uint8_t *mac, const uint8_t *data, int len) {
     if (!mac || !data || len <= 0) return;
-    uint8_t clipped = (len > ESPNOW_MAX_PAYLOAD_BYTES) ? ESPNOW_MAX_PAYLOAD_BYTES : (uint8_t)len;
+    uint8_t clipped = (len > tdma::ESPNOW_MAX_PAYLOAD_BYTES) ? tdma::ESPNOW_MAX_PAYLOAD_BYTES : (uint8_t)len;
 
     portENTER_CRITICAL_ISR(&rx_mux_);
     uint8_t next = (rx_head_ + 1U) % tdma::RX_QUEUE_LEN;

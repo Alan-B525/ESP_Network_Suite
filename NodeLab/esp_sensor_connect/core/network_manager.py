@@ -100,9 +100,6 @@ class NetworkManager:
         # You might want to store this in state or a separate dict
         return self.state.get_telemetry(node_id)
 
-    def set_on_raw_line(self, callback: Callable[[str], None]):
-        self.serial.on_line_received = callback
-
     def send_command(self, cmd: str) -> bool:
         return self.serial.send(cmd)
 

@@ -7,7 +7,7 @@ NodeRegistry::NodeRegistry() {
 }
 
 ActiveNodeEntry* NodeRegistry::findOrCreateNode(const uint8_t *mac, uint8_t node_id) {
-    // Buscar por MAC
+    // Buscar por MAC (nodo ya conocido)
     for (uint8_t i = 0; i < tdma::MAX_NODES; i++) {
         if (nodes_[i].in_use && memcmp(nodes_[i].mac, mac, 6) == 0) {
             if (nodes_[i].node_id != node_id && tdma::isValidNodeId(node_id)) {
@@ -16,6 +16,17 @@ ActiveNodeEntry* NodeRegistry::findOrCreateNode(const uint8_t *mac, uint8_t node
             return &nodes_[i];
         }
     }
+
+    // Auto-asignar ID si el nodo envió node_id=0 (sin asignar)
+    if (node_id == 0) {
+        for (uint8_t id = 1; id <= tdma::MAX_NODES; id++) {
+            if (!findNodeById(id)) {
+                node_id = id;
+                break;
+            }
+        }
+    }
+
     if (!tdma::isValidNodeId(node_id)) return nullptr;
 
     // Verificar que el ID no esté en uso por otra MAC

@@ -23,6 +23,8 @@ class SerialService:
         self.on_line_received: Optional[Callable[[str], None]] = None
         
         self.data_queue = None # For DataLogger compatibility
+        self._auto_connect_cooldown = 0.0
+        self._last_failed_port = ""
 
     @staticmethod
     def list_ports() -> List[Dict]:
@@ -70,7 +72,10 @@ class SerialService:
 
     def disconnect(self):
         self._running.clear()
-        if self._reader_thread and self._reader_thread.is_alive():
+        # Don't join the reader thread if we're being called from within it
+        if (self._reader_thread 
+            and self._reader_thread.is_alive() 
+            and self._reader_thread is not threading.current_thread()):
             self._reader_thread.join(timeout=1.0)
         
         if self._serial and self._serial.is_open:
@@ -120,36 +125,50 @@ class SerialService:
         return bytes(decoded)
 
     def _reader_loop(self):
+        """
+        COBS-first reader: The BaseStation sends ALL data COBS-encoded
+        (including ASCII messages like HELLO, BEACON, etc.).
+        Strategy: accumulate bytes until 0x00 delimiter, then COBS-decode.
+        """
+        cobs_buffer = bytearray()
+        frames_received = 0
+
+        print(f"[SERIAL] Reader started on {self.current_port} @ {self.current_baudrate}")
+
         while self._running.is_set():
             try:
                 if not self._serial or not self._serial.is_open:
                     time.sleep(0.1)
                     continue
 
-                if self._serial.in_waiting > 0:
-                    # Read one byte to see if it's COBS or ASCII
-                    peek = self._serial.read(1)
-                    if not peek: continue
-
-                    if peek == b'\x00': # Empty frame or separator
+                waiting = self._serial.in_waiting
+                if waiting > 0:
+                    chunk = self._serial.read(min(waiting, 1024))
+                    if not chunk:
                         continue
-                        
-                    # If it's a typical ASCII start or not COBS code
-                    if peek.isalnum() or peek in b' \r\n#[':
-                        line = peek + self._serial.readline()
-                        try:
-                            decoded_line = line.decode('utf-8', errors='ignore').strip()
-                            if decoded_line and self.on_line_received:
-                                self.on_line_received(decoded_line)
-                        except:
-                            pass
-                    else:
-                        # Assume COBS
-                        raw_data = peek + self._serial.read_until(b'\x00')
-                        if raw_data[-1] == 0:
-                            decoded = self._cobs_decode(raw_data[:-1])
-                            if decoded:
-                                self._on_frame_received(decoded)
+
+                    for byte in chunk:
+                        if byte == 0x00:
+                            # End of COBS frame — decode it
+                            if len(cobs_buffer) >= 2:
+                                decoded = self._cobs_decode(bytes(cobs_buffer))
+                                if decoded:
+                                    self._on_frame_received(decoded)
+                                    frames_received += 1
+                                    if frames_received <= 5:
+                                        msg_type = decoded[0]
+                                        type_names = {0x01: "ASCII", 0x02: "DATA", 0x03: "TIMING"}
+                                        tname = type_names.get(msg_type, f"0x{msg_type:02X}")
+                                        preview = ""
+                                        if msg_type == 0x01:
+                                            preview = f" → {decoded[1:60].decode('utf-8', errors='replace')}"
+                                        print(f"[SERIAL] Frame #{frames_received}: type={tname}, len={len(decoded)}{preview}")
+                            cobs_buffer.clear()
+                        else:
+                            cobs_buffer.append(byte)
+                            # Safety: prevent unbounded buffer growth
+                            if len(cobs_buffer) > 2048:
+                                cobs_buffer.clear()
                 else:
                     time.sleep(0.001)
             except (PermissionError, OSError, serial.SerialException) as e:

@@ -1,0 +1,5 @@
+{
+    "port": "COM13",
+    "baudrate": "921600",
+    "tdma_freq": "1000"
+}

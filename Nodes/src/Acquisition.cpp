@@ -1,13 +1,15 @@
 #include "Acquisition.h"
-#include <math.h>
 
 Acquisition *Acquisition::s_instance = nullptr;
 
 void Acquisition::begin() {
     s_instance = this;
-    for (int i = 0; i < 256; i++) {
-        sine_lut_[i] = (int16_t)(sinf(2.0f * PI * (float)i / 256.0f) * 32767.0f);
-    }
+
+    // ── Configurar ADC para lectura real en GPIO 0 ──
+    // Atenuación 11dB → rango de entrada 0 – ~3.3V
+    // ESP32-C3 ADC es siempre 12 bits (0–4095)
+    analogSetAttenuation(ADC_11db);
+    pinMode(ADC_PIN, INPUT);
 
     const esp_timer_create_args_t timer_args = {
         .callback = &Acquisition::onAcqTimerISR,
@@ -26,7 +28,7 @@ void Acquisition::begin() {
     }, "acq_task", 4096, this, 3, nullptr);
 }
 
-void Acquisition::start(uint32_t rate_hz) {
+void Acquisition::start(uint32_t rate_hz, uint64_t sync_anchor_us) {
     if (acq_running_) stop();
     current_rate_hz_ = rate_hz;
     uint32_t period_us = 1000000UL / rate_hz;
@@ -37,6 +39,18 @@ void Acquisition::start(uint32_t rate_hz) {
     }
     overflow_count_ = 0;
     acq_running_ = true;
+    
+    // Phase alignment: calculate exactly when the next slot boundary is
+    uint64_t now_us = esp_timer_get_time();
+    uint32_t delay_us = period_us;
+    if (sync_anchor_us > 0 && now_us > sync_anchor_us) {
+        uint64_t elapsed_since_anchor = now_us - sync_anchor_us;
+        delay_us = period_us - (elapsed_since_anchor % period_us);
+    }
+    if (delay_us > 0 && delay_us <= period_us) {
+        ets_delay_us(delay_us); // Busy-wait to microsecond precision
+    }
+    
     esp_timer_start_periodic(acq_timer_, period_us);
 }
 
@@ -87,33 +101,19 @@ void Acquisition::processTicks() {
             continue;
         }
 
+        // Leer ADC una sola vez por tick (solo canal 0)
+        int16_t adc_value = readADC();
         for (uint8_t ch = 0; ch < NUM_CHANNELS; ch++) {
             uint32_t idx = produced_[ch] % SAMPLE_RING_CAPACITY;
-            sample_ring_[ch][idx] = generateSample(ch);
+            sample_ring_[ch][idx] = adc_value;
             produced_[ch]++;
         }
     }
 }
 
-int16_t Acquisition::generateSample(uint8_t ch) {
-    uint16_t step = 2 + ch;
-    sine_phase_[ch] = (sine_phase_[ch] + step) & 0xFF;
-    int32_t amplitude = 1500;
-    int32_t val = 2048;
-    
-    switch (ch) {
-        case 0: val = 2048 + (int32_t)sine_lut_[sine_phase_[ch]] * amplitude / 32767; break;
-        case 1: val = (sine_phase_[ch] < 128) ? (2048 + amplitude) : (2048 - amplitude); break;
-        case 2: val = (sine_phase_[ch] < 128) ? (2048 - amplitude + (amplitude * 2 * sine_phase_[ch] / 127)) : (2048 + amplitude - (amplitude * 2 * (sine_phase_[ch] - 128) / 127)); break;
-        case 3: val = 2048 - amplitude + (amplitude * 2 * sine_phase_[ch] / 255); break;
-    }
-    
-    uint32_t x = prng_state_;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-    prng_state_ = x;
-    val += (int32_t)(x % 21U) - 10;
-    
-    if (val < 0) val = 0;
-    if (val > 4095) val = 4095;
-    return (int16_t)val;
+// ── Lectura real del ADC ──
+// Devuelve valor calibrado en miliVoltios directamente desde GPIO 0 usando eFuse
+int16_t Acquisition::readADC() {
+    return (int16_t)analogReadMilliVolts(ADC_PIN);
 }
+

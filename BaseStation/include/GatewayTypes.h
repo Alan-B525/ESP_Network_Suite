@@ -7,7 +7,7 @@
 struct RxFrame {
     uint8_t mac[6];
     uint8_t len;
-    uint8_t payload[ESPNOW_MAX_PAYLOAD_BYTES];
+    uint8_t payload[tdma::ESPNOW_MAX_PAYLOAD_BYTES];
     uint32_t rx_us;
 };
 

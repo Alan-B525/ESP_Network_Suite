@@ -82,7 +82,7 @@ void NodeApp::run() {
     }
 }
 
-void NodeApp::onDataSentStatic(const uint8_t *mac, esp_now_send_status_t status) {}
+void NodeApp::onDataSentStatic(const uint8_t *mac, esp_now_send_status_t /*status*/) {}
 
 void NodeApp::onDataRecvStatic(const uint8_t *mac, const uint8_t *data, int len) {
     if (!s_instance || len < 1) return;
@@ -109,7 +109,7 @@ void NodeApp::handleBeaconSync(const uint8_t *data, int len) {
         for(int i=0; i<NUM_CHANNELS; i++) sent_idx_[i] = 0;
         next_seq_ = 1;
         timing_info_sent_at_start_ = false;
-        acq_.start(beacon.sample_rate_hz);
+        acq_.start(beacon.sample_rate_hz, sync_anchor_us_);
     } else if (system_state_ != tdma::STATE_ACQUIRING && acq_.isRunning()) {
         acq_.stop();
     }
@@ -169,11 +169,20 @@ uint8_t NodeApp::sendDataPacket(uint8_t ch) {
     uint32_t pending = acq_.getProduced(ch) - sent_idx_[ch];
     if (pending == 0) return 0;
 
-    uint16_t count = (pending > 100) ? 100 : (uint16_t)pending; // Simplified count
-    tdma::DataPacketHeader hdr = {tdma::PKT_DATA, tdma::PROTOCOL_VERSION, node_id_, ch, 
-                                  tdma::SAMPLE_INT16, next_seq_, count, sent_idx_[ch], 0};
+    uint16_t count = (pending > 100) ? 100 : (uint16_t)pending;
+    tdma::DataPacketHeader hdr = {};
+    hdr.type = tdma::PKT_DATA;
+    hdr.version = tdma::PROTOCOL_VERSION;
+    hdr.node_id = node_id_;
+    hdr.channel_id = ch;
+    hdr.sample_encoding = tdma::SAMPLE_INT16;
+    hdr.reserved = 0;
+    hdr.sequence_id = next_seq_;
+    hdr.sample_count = count;
+    hdr.first_sample_index = sent_idx_[ch];
+    hdr.crc16 = 0;
     
-    uint8_t buf[ESPNOW_MAX_PAYLOAD_BYTES];
+    uint8_t buf[tdma::ESPNOW_MAX_PAYLOAD_BYTES];
     memcpy(buf, &hdr, tdma::DATA_HEADER_SIZE);
     for (uint16_t i=0; i<count; i++) {
         int16_t val = acq_.getSample(ch, sent_idx_[ch] + i);

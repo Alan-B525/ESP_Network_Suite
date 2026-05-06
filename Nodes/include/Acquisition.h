@@ -5,13 +5,18 @@
 #include <esp_timer.h>
 #include <tdma_protocol.h>
 
-#define NUM_CHANNELS 4
+// ============================================================
+// Solo 1 canal activo: ADC1_CH0 en GPIO 0 (señal real)
+// Los canales 1, 2, 3 no se utilizan.
+// ============================================================
+#define NUM_CHANNELS 1
+#define ADC_PIN      0          // GPIO 0 = ADC1 Channel 0
 #define SAMPLE_RING_CAPACITY 4096U
 
 class Acquisition {
 public:
     void begin();
-    void start(uint32_t rate_hz);
+    void start(uint32_t rate_hz, uint64_t sync_anchor_us);
     void stop();
     
     bool isRunning() const { return acq_running_; }
@@ -26,7 +31,7 @@ public:
 private:
     static void IRAM_ATTR onAcqTimerISR(void* arg);
     void processTicks();
-    int16_t generateSample(uint8_t ch);
+    int16_t readADC();
 
     esp_timer_handle_t acq_timer_ = nullptr;
     bool acq_running_ = false;
@@ -36,10 +41,6 @@ private:
     uint32_t produced_[NUM_CHANNELS] = {};
     uint32_t acked_[NUM_CHANNELS] = {};
     uint32_t overflow_count_ = 0;
-    
-    uint16_t sine_phase_[NUM_CHANNELS] = {};
-    int16_t sine_lut_[256];
-    uint32_t prng_state_ = 0x5A17C3E5u;
 
     volatile uint32_t pending_ticks_ = 0;
     portMUX_TYPE acq_mux_ = portMUX_INITIALIZER_UNLOCKED;
